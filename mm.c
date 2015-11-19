@@ -24,11 +24,18 @@
 
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
-#define DEBUG
+#define DEBUGx
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
 #else
 # define dbg_printf(...)
+#endif
+
+#define CHECKHEAPx
+#ifdef CHECKHEAP
+#define checkheap_printf(l, m) printf("line %d: %s\n", l, m)
+#else
+#define checkheap_printf(l, m)
 #endif
 
 #define VERBOSEx
@@ -142,12 +149,12 @@ static void *extend_heap(size_t words)
     /* Initialize free block header/footer and the epilogue header */
     PUTWORD(HDRP(bp), PACK(size, 0));         /* Free block header */   
     PUTWORD(FTRP(bp), PACK(size, 0));         /* Free block footer */   
-    ((fl_node *)bp) -> next = freelist_head;  /* Free block next pointer */
-    ((fl_node *)bp) -> prev = NULL;           /* Free block prev pointer */
+    ((fl_node *) bp) -> next = freelist_head; /* Free block next pointer */
+    ((fl_node *) bp) -> prev = NULL;          /* Free block prev pointer */
     PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */ 
 
     if (freelist_head) {
-        ((fl_node *) freelist_head) -> prev = (fl_node *) bp;
+        freelist_head -> prev = (fl_node *) bp; /* Next block prev pointer */
     }
 
     /* Coalesce if the previous block was free */
@@ -162,23 +169,23 @@ static void *extend_heap(size_t words)
  * Initialize: return -1 on error, 0 on success.
  */
 int mm_init(void) {
-    if (heap_start) {
-        /* Not first time initialization */
-        byte *bp = (heap_start + DSIZE);
+    dbg_printf("\nmm_init, line %d\n", __LINE__);
+    //if (heap_start) {
+        //byte *bp = (heap_start + DSIZE);
 
-        size_t heap_size = mem_heapsize();
+        //size_t heap_size = mem_heapsize();
         //TODO not sure how sbrk works in init, hence this dbg_printf
-        dbg_printf("In mm_init, heap_size = %u\n", (unsigned int)heap_size);
-        size_t block_size = heap_size - DSIZE;
-        PUTWORD(heap_start, 0);                    /* Alignment padding */
-        PUTWORD(HDRP(bp), PACK(block_size, 0));    /* Block header */
-        freelist_head = (fl_node *) bp;         
-        freelist_head -> next = NULL;              /* Free block next pointer */
-        freelist_head -> prev = NULL;              /* Free block prev pointer */
-        PUTWORD(FTRP(bp), PACK(block_size, 0));    /* Block footer */
-        mm_checkheap(__LINE__);
-        return 0;
-    }
+        //dbg_printf("In mm_init, heap_start, heap_size = %u\n", (unsigned int)heap_size);
+        //size_t block_size = heap_size - DSIZE;
+        //PUTWORD(heap_start, 0);                    /* Alignment padding */
+        //PUTWORD(HDRP(bp), PACK(block_size, 0));    /* Block header */
+        //freelist_head = (fl_node *) bp;         
+        //freelist_head -> next = NULL;              /* Free block next pointer */
+        //freelist_head -> prev = NULL;              /* Free block prev pointer */
+        //PUTWORD(FTRP(bp), PACK(block_size, 0));    /* Block footer */
+        //mm_checkheap(__LINE__);
+        //return 0;
+    //}
 
     /* First time initialization */
 
@@ -192,33 +199,77 @@ int mm_init(void) {
     PUTWORD(heap_start, 0);                             /* Alignment padding */
     PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1));      /* Epilogue header */
     mm_checkheap(__LINE__);
-
-    freelist_head = extend_heap(CHUNKSIZE / WSIZE);
-
+    extend_heap(CHUNKSIZE / WSIZE);
+    freelist_head -> next = NULL;              /* Free block next pointer */
+    freelist_head -> prev = NULL;              /* Free block prev pointer */
     mm_checkheap(__LINE__);
     return 0;
+}
+
+static void *find_fit(size_t asize) {
+    fl_node *p_node;
+    /* First-fit */
+    for (p_node = freelist_head; p_node; p_node = p_node -> next) {
+        void *bp = (void *)p_node;
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            return bp;
+        }
+    }
+    return NULL; /* No fit */
 }
 
 /* 
  * place - Place block of asize bytes at start of free block bp 
  *         and split if remainder would be at least minimum block size
  */
-static void place(void *bp, size_t asize)
-{
+// TODO NEXT.
+// First go over design of malloc and free.
+static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp));   
-
+    fl_node *bp_node = (fl_node *) bp;
     if ((csize - asize) >= MIN_BLOCKSIZE) { 
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize-asize, 0));
-        PUT(FTRP(bp), PACK(csize-asize, 0));
+        /* If remaining block is larger than or equal to minimum block size,
+         * split the block into two blocks and allocate the first one */
+        /* Allocate current block */
+        PUTWORD(HDRP(bp), PACK(asize, 1));
+        PUTWORD(FTRP(bp), PACK(asize, 1));
+        /* Construct freelist */
+        void *newbp = NEXT_BLKP(bp);
+        fl_node *newbp_node = (fl_node *) newbp;
 
+        /* Assign old prev and next pointers to new freelist node */
+        newbp_node -> prev = bp_node -> prev;
+        newbp_node -> next = bp_node -> next;
+        /* Detatch and assign prev and next pointers for prev and next node */
+        if (bp_node -> prev == NULL) {
+            freelist_head = newbp_node;
+        }
+        else {
+            bp_node -> prev -> next = newbp_node;
+        }
+        if (bp_node -> next != NULL) {
+            bp_node -> next -> prev = newbp_node;
+        }
+
+        /* Construct the boundary tags for the remaining block of memory */
+        PUTWORD(HDRP(newbp), PACK(csize-asize, 0));
+        PUTWORD(FTRP(newbp), PACK(csize-asize, 0));
     }
     else { 
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
+        /* If remaining block is smaller than minimum block size,
+         * allocate the whole block */
+        /* Allocate current block */
+        PUTWORD(HDRP(bp), PACK(csize, 1));
+        PUTWORD(FTRP(bp), PACK(csize, 1));
+        if (bp_node -> prev == NULL) {
+            freelist_head = bp_node -> next;
+        }
+        else {
+            bp_node -> prev -> next = bp_node -> next;
+        }
+        if (bp_node -> next != NULL) {
+            bp_node -> next -> prev = bp_node -> prev;
+        }
     }
 }
 
@@ -226,14 +277,48 @@ static void place(void *bp, size_t asize)
  * malloc
  */
 void *malloc (size_t size) {
+    dbg_printf("malloc, size = %u\n", (word)size);
+    mm_checkheap(__LINE__);
+    size_t asize;      /* Adjusted block size */
+    size_t extendsize; /* Amount to extend heap if no fit */
+    byte *bp;      
+    if (freelist_head == NULL) {
+        mm_init();
+    }
 
-    return NULL;
+    /* Ignore spurious requests */
+    if (size == 0) {
+        return NULL;
+    }
+
+    if (size < DSIZE) {
+        asize = MIN_BLOCKSIZE + DSIZE;
+    }
+    else {
+        asize = MIN_BLOCKSIZE + ROUNDUP_DIV(size, DSIZE) * DSIZE;
+    }
+    if ((bp = find_fit(asize)) != NULL) {
+        mm_checkheap(__LINE__);
+        place(bp, asize);
+        mm_checkheap(__LINE__);
+        return bp;
+    }
+
+    /* No fit found. Get more memory and place the block */
+    extendsize = MAX(asize, CHUNKSIZE);                 
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL)  
+        return NULL;                                  
+    mm_checkheap(__LINE__);
+    place(bp, asize);                                 
+    mm_checkheap(__LINE__);
+    return bp;
 }
 
 /*
  * free
  */
 void free (void *ptr) {
+    dbg_printf("free, ptr = %llx\n", (dword)ptr);
     if(!ptr) return;
 }
 
@@ -270,10 +355,6 @@ static int aligned(const void *p) {
     return (size_t)ALIGN(p) == (size_t)p;
 }
 
-inline void checkheap_printf(int lineno, const char *message) {
-    printf("line %d: %s\n", lineno, message);
-}
-
 /*
  * mm_checkheap
  */
@@ -290,7 +371,7 @@ void mm_checkheap(int lineno) {
     if ((GETWORD(((byte *) heap_end) + 1 - WSIZE)) != 1) {
         checkheap_printf(lineno, "epilogue block header is not 1\n");
 
-        verbose_printf("epilog block header addr is %llx, value is %d\n",
+        printf("epilog block header addr is %llx, value is %d\n",
                 (dword)(((byte *) heap_end) + 1 - WSIZE),
                 (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
     }
@@ -348,10 +429,12 @@ void mm_checkheap(int lineno) {
     while (p_node && p_node -> next) {
         fl_node *old_p_node = p_node;
         p_node = p_node -> next;
-        if (!in_heap(p_node))
+        if (!in_heap(p_node)) {
             checkheap_printf(lineno, "p_node is not in heap");
-        if (!in_heap(old_p_node))
+        }
+        if (!in_heap(old_p_node)) {
             checkheap_printf(lineno, "old_p_node is not in heap");
+        }
         if (old_p_node != p_node -> prev) {
             checkheap_printf(lineno, "old_p_node != p_node -> prev");
             break;
@@ -364,8 +447,8 @@ void mm_checkheap(int lineno) {
         freelist_node_count++;
     }
     if (freelist_node_count != freeblock_count) {
-        printf("line %d: freelist_node_count = %d, freeblock_count = %d\n",
-                lineno, freelist_node_count, freeblock_count);
+        //printf("line %d: freelist_node_count = %d, freeblock_count = %d\n",
+                //lineno, freelist_node_count, freeblock_count);
     }
 }
 
