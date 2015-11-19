@@ -84,12 +84,15 @@
 #define GET_ALLOC(p) (GETWORD(p) & 0x1)                    
 
 /* Given block ptr bp, compute address of its header and footer */
-#define HDRP(bp)       ((char *)(bp) - WSIZE)                      
-#define FTRP(bp)       ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) 
+#define HDRP(bp)       ((byte *)(bp) - WSIZE)                      
+#define FTRP(bp)       ((byte *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) 
 
 /* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) 
-#define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
+#define NEXT_BLKP(bp)  ((byte *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) 
+#define PREV_BLKP(bp)  ((byte *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
+
+/* Given block ptr bp, compute address of previous block footer */
+#define PREV_FTRP(bp)  ((byte *)(bp) - DSIZE)
 
 /* Round up division for positive integers */
 #define ROUNDUP_DIV(x, y)   ((((x) - 1) / (y)) + 1)
@@ -127,14 +130,90 @@ static fl_node *freelist_head = 0;  /* Head pointer of the free list */
 
 static byte *heap_start = 0;        /* The start of the heap */
 
-static void *coalesce(void *bp) {
-    word prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+static inline void delete_freelist_node (fl_node *p) {
+    if (p -> prev) {
+        p -> prev -> next = p -> next;
+    }
+    else {
+        freelist_head = p -> next;
+    }
+    if (p -> next) {
+        p -> next -> prev = p -> prev;
+    }
+}
+
+static void *coalesce (void *bp) {
+    word prev_alloc = GET_ALLOC(PREV_FTRP(bp));
     word next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
-    
+
+    byte *next_bp = NEXT_BLKP(bp);
+    byte *prev_bp = PREV_BLKP(bp);
+
+    fl_node *bp_node = (fl_node *) bp;
+    fl_node *bp_next_node = (fl_node *) next_bp;
+    fl_node *bp_prev_node = (fl_node *) prev_bp;
+
     if (prev_alloc && next_alloc) {         /* Case 1 */
         return bp;
     }
+
+    else if (prev_alloc && !next_alloc) {   /* Case 2 */
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUTWORD(HDRP(bp), PACK(size, 0));
+        PUTWORD(FTRP(bp), PACK(size,0));
+        /* delete bp_next_node from freelist */
+        delete_freelist_node(bp_next_node);
+    }
+
+    else if (!prev_alloc && next_alloc) {      /* Case 3 */
+        //mm_checkheap(__LINE__);
+        size += GET_SIZE(HDRP(prev_bp));
+        PUTWORD(HDRP(prev_bp), PACK(size, 0));
+        PUTWORD(FTRP(prev_bp), PACK(size, 0));
+        /* delete bp_node from freelist */
+
+        delete_freelist_node(bp_prev_node);
+        bp_prev_node -> next = bp_node -> next;
+        bp_prev_node -> prev = bp_node -> prev;
+        if (bp_node -> prev) {
+            bp_node -> prev -> next = bp_prev_node;
+        }
+        else {
+            freelist_head = bp_prev_node;
+        }
+        if (bp_node -> next) {
+            bp_node -> next -> prev = bp_prev_node;
+        }
+
+        bp = prev_bp;
+        //mm_checkheap(__LINE__);
+        //printf("3.");
+    }
+
+    else {                                     /* Case 4 */
+        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
+        PUTWORD(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        PUTWORD(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        delete_freelist_node(bp_prev_node);
+        delete_freelist_node(bp_next_node);
+
+        bp_prev_node -> next = bp_node -> next;
+        bp_prev_node -> prev = bp_node -> prev;
+        if (bp_node -> prev) {
+            bp_node -> prev -> next = bp_prev_node;
+        }
+        else {
+            freelist_head = bp_prev_node;
+        }
+        if (bp_node -> next) {
+            bp_node -> next -> prev = bp_prev_node;
+        }
+
+        //printf("4.");
+        bp = prev_bp;
+    }
+
     return bp;
 }
 
@@ -164,8 +243,9 @@ static void *extend_heap(size_t words)
     }
 
     /* Coalesce if the previous block was free */
-    //TODO
+    dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
     bp = coalesce(bp);
+    dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
     freelist_head = (fl_node *) bp;
 
     return bp;
@@ -176,38 +256,20 @@ static void *extend_heap(size_t words)
  */
 int mm_init(void) {
     dbg_printf("\nmm_init, line %d\n", __LINE__);
-    //if (heap_start) {
-        //byte *bp = (heap_start + DSIZE);
-
-        //size_t heap_size = mem_heapsize();
-        //TODO not sure how sbrk works in init, hence this dbg_printf
-        //dbg_printf("In mm_init, heap_start, heap_size = %u\n", (unsigned int)heap_size);
-        //size_t block_size = heap_size - DSIZE;
-        //PUTWORD(heap_start, 0);                    /* Alignment padding */
-        //PUTWORD(HDRP(bp), PACK(block_size, 0));    /* Block header */
-        //freelist_head = (fl_node *) bp;         
-        //freelist_head -> next = NULL;              /* Free block next pointer */
-        //freelist_head -> prev = NULL;              /* Free block prev pointer */
-        //PUTWORD(FTRP(bp), PACK(block_size, 0));    /* Block footer */
-        //mm_checkheap(__LINE__);
-        //return 0;
-    //}
-
-    /* First time initialization */
 
     /**
      * |....|....|
-     * |pad |epi |
+     * |pro |epi |
      */
     if ((heap_start = mem_sbrk(DSIZE)) == (void *) -1) {
         return -1;
     }
-    PUTWORD(heap_start, 0);                             /* Alignment padding */
+    PUTWORD(heap_start, PACK(0, 1)); /* Prologue footer, Alignment padding */
     PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1));      /* Epilogue header */
     //mm_checkheap(__LINE__);
     extend_heap(CHUNKSIZE / WSIZE);
-    freelist_head -> next = NULL;              /* Free block next pointer */
-    freelist_head -> prev = NULL;              /* Free block prev pointer */
+    freelist_head -> next = NULL;               /* Free block next pointer */
+    freelist_head -> prev = NULL;               /* Free block prev pointer */
     //mm_checkheap(__LINE__);
     return 0;
 }
@@ -324,7 +386,7 @@ void *malloc (size_t size) {
  * free
  */
 void free (void *bp) {
-    dbg_printf("free, ptr = %llx\n", (dword)ptr);
+    dbg_printf("free, bp = %llx\n", (dword)bp);
     if (bp == 0) return;
     size_t size = GET_SIZE(HDRP(bp));
     //if (freelist_head == 0) {
@@ -341,7 +403,9 @@ void free (void *bp) {
     }
     freelist_head = bp_node;
 
+    dbg_printf("Before free coalescing\n");
     coalesce(bp);
+    dbg_printf("After free coalescing\n");
 }
 
 /*
@@ -438,15 +502,15 @@ void mm_checkheap(int lineno) {
 
     bool prev_isfree = 0;
     int freeblock_count = 0;
-    while (bp < heap_end) {
+    while (bp && bp < heap_end - 1) {
         word header = GETWORD(HDRP(bp));
         word footer = GETWORD(FTRP(bp));
-        verbose_printf("line %d: bp = %llx, header = %d, footer = %d\n",
-                lineno, (dword) bp, header, footer);
         /* Check header euqals footer */
+        //printf("header = %d, footer = %d\n", header, footer);
         if (header != footer) {
-            printf("line %d: header != footer for bp = %llx\n",
+            printf("line %d: header != footer for bp = %llx, ",
                     lineno, (dword) bp);
+            printf("header = %d, footer = %d\n", header, footer);
         }
         /* Check block size is larger than minimum block size */
         if (GET_SIZE(HDRP(bp)) < MIN_BLOCKSIZE) {
@@ -466,6 +530,7 @@ void mm_checkheap(int lineno) {
 
         bp += GET_SIZE(HDRP(bp));
     }
+    
 
     /* Check loop in freelist */
     fl_node *hare = freelist_head;
