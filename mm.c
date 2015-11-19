@@ -128,7 +128,13 @@ static fl_node *freelist_head = 0;  /* Head pointer of the free list */
 static byte *heap_start = 0;        /* The start of the heap */
 
 static void *coalesce(void *bp) {
-    //TODO
+    word prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    word next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+    
+    if (prev_alloc && next_alloc) {         /* Case 1 */
+        return bp;
+    }
     return bp;
 }
 
@@ -198,11 +204,11 @@ int mm_init(void) {
     }
     PUTWORD(heap_start, 0);                             /* Alignment padding */
     PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1));      /* Epilogue header */
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     extend_heap(CHUNKSIZE / WSIZE);
     freelist_head -> next = NULL;              /* Free block next pointer */
     freelist_head -> prev = NULL;              /* Free block prev pointer */
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     return 0;
 }
 
@@ -278,7 +284,7 @@ static void place(void *bp, size_t asize) {
  */
 void *malloc (size_t size) {
     dbg_printf("malloc, size = %u\n", (word)size);
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     size_t asize;      /* Adjusted block size */
     size_t extendsize; /* Amount to extend heap if no fit */
     byte *bp;      
@@ -298,9 +304,9 @@ void *malloc (size_t size) {
         asize = MIN_BLOCKSIZE + ROUNDUP_DIV(size, DSIZE) * DSIZE;
     }
     if ((bp = find_fit(asize)) != NULL) {
-        mm_checkheap(__LINE__);
+        //mm_checkheap(__LINE__);
         place(bp, asize);
-        mm_checkheap(__LINE__);
+        //mm_checkheap(__LINE__);
         return bp;
     }
 
@@ -308,25 +314,70 @@ void *malloc (size_t size) {
     extendsize = MAX(asize, CHUNKSIZE);                 
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL)  
         return NULL;                                  
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     place(bp, asize);                                 
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     return bp;
 }
 
 /*
  * free
  */
-void free (void *ptr) {
+void free (void *bp) {
     dbg_printf("free, ptr = %llx\n", (dword)ptr);
-    if(!ptr) return;
+    if (bp == 0) return;
+    size_t size = GET_SIZE(HDRP(bp));
+    //if (freelist_head == 0) {
+        //mm_init();
+    //}
+    /* Put new boundary tags around the block to free */
+    PUTWORD(HDRP(bp), PACK(size, 0));
+    PUTWORD(FTRP(bp), PACK(size, 0));
+    fl_node *bp_node = (fl_node *) bp;
+    bp_node -> next = freelist_head;
+    bp_node -> prev = NULL;
+    if (freelist_head) {
+        freelist_head -> prev = bp_node;
+    }
+    freelist_head = bp_node;
+
+    coalesce(bp);
 }
 
 /*
  * realloc - you may want to look at mm-naive.c
  */
 void *realloc(void *oldptr, size_t size) {
-    return NULL;
+    size_t oldsize;
+    void *newptr;
+
+    /* If size == 0 then this is just free, and we return NULL. */
+    if(size == 0) {
+        free(oldptr);
+        return 0;
+    }
+
+    /* If oldptr is NULL, then this is just malloc. */
+    if(oldptr == NULL) {
+        return malloc(size);
+    }
+
+    newptr = malloc(size);
+
+    /* If realloc() fails the original block is left untouched  */
+    if(!newptr) {
+        return 0;
+    }
+
+    /* Copy the old data. */
+    oldsize = GET_SIZE(HDRP(oldptr));
+    if(size < oldsize) oldsize = size;
+    memcpy(newptr, oldptr, oldsize);
+
+    /* Free the old block. */
+    free(oldptr);
+
+    return newptr;
 }
 
 /*
@@ -335,7 +386,13 @@ void *realloc(void *oldptr, size_t size) {
  * needed to run the traces.
  */
 void *calloc (size_t nmemb, size_t size) {
-    return NULL;
+    size_t bytes = nmemb * size;
+    void *newptr;
+
+    newptr = malloc(bytes);
+    memset(newptr, 0, bytes);
+
+    return newptr;
 }
 
 
