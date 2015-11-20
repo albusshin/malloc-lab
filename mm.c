@@ -63,7 +63,7 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<12)  /* Extend heap by this amount (bytes) */  
+#define CHUNKSIZE  (1<<8)  /* Extend heap by this amount (bytes) */  
 #define MIN_BLOCKSIZE 24    /* Minimum block size for explicit free list */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
