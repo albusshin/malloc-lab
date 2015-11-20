@@ -1,15 +1,6 @@
 /*
  * mm.c
  *
- * Tian Xin * txin
- * TODO
- * First, try a explicit free lists approach, with LIFO policy
- * Then, try with Address-ordered policy
- * Then, try with Segregated list, with LIFO poilcy //TODO IMPORTANT
- * Then, try with Seglist with Address-ordered policy,
- * and compare the last two.
- * Then, optimize. 
- * Optimizations always comes last.
  * NOTE TO STUDENTS: Replace this header comment with your own header
  * comment that gives a high level description of your solution.
  */
@@ -24,7 +15,7 @@
 
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
-#define DEBUGx
+#define DEBUG
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
 #else
@@ -63,22 +54,15 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<4)  /* Extend heap by this amount (bytes) */  
-#define MIN_BLOCKSIZE 24    /* Minimum block size for explicit free list */
+#define CHUNKSIZE  (1<<4)   /* Extend heap by this amount (bytes) */  
+#define MIN_BLOCKSIZE 8     /* Minimum block size this implementation */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
 #define MIN(x, y) ((x) < (y)? (x) : (y))  
 
-/* Pack a size and allocated bit into a word */
-#define PACK(size, alloc)  ((size) | (alloc)) 
-
 /* Read and write a word at address p */
 #define GETWORD(p)       (*(unsigned int *)(p))            
 #define PUTWORD(p, val)  (*(unsigned int *)(p) = (val))    
-
-/* Read and write a dword at address p */
-#define GETDWORD(p)      (*(unsigned long long *)(p))            
-#define PUTDWORD(p, val) (*(unsigned long long *)(p) = (val))
 
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)  (GETWORD(p) & ~0x7)                   
@@ -90,7 +74,6 @@
 
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp)  ((byte *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) 
-#define PREV_BLKP(bp)  ((byte *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
 
 /* Given block ptr bp, compute address of previous block footer */
 #define PREV_FTRP(bp)  ((byte *)(bp) - DSIZE)
@@ -100,6 +83,8 @@
 
 #define UINT_MAX 0xFFFFFFFF;
 
+
+
 typedef int bool;
 
 /* Assuming 64-bit machines */
@@ -107,148 +92,188 @@ typedef unsigned int        word;
 typedef unsigned char       byte;
 typedef unsigned long long  dword;
 
-//TODO try use macros
+/* Structure for tree node, for blocks larger than 24 bytes */
+typedef struct treenode {
+    struct treenode *left;
+    struct treenode *mid;
+    struct treenode *right;
+} treenode;
 
-typedef struct freelist_node {
-    struct freelist_node *next;
-    struct freelist_node *prev;
-} fl_node;
+/* 8-byte blocks list node */
+typedef struct list8_node {
+    word next_offset;
+} l8node;
 
-/*
- * Given a free block pointer bp, return the address of next free block address
- */
-inline byte *get_freelist_next(void *bp) {
-    return (byte *) *((dword *) bp);
+/* 16-byte blocks list node */
+typedef struct list16_node {
+    struct list16_node *next;
+} l16node;
+
+/* 24-byte blocks list node */
+typedef struct list24_node {
+    struct list24_node *next;
+} l24node;
+
+static byte *heap_start = 0;       /* The start of the heap */
+static l8node      *l8head = 0;    /* 8 bytes block list head */
+static l16node     *l16head = 0;   /* 16 bytes block list head */
+static l24node     *l24head = 0;   /* 24 bytes block list head */
+static treenode    *root = 0;      /* tree root for >24 bytes blocks */
+
+
+//TODO try using macros
+
+/* Pack a size and allocated bit into a word */
+static inline word PACK(size_t size, int prev_is_8, int alloc) {
+    return size | (prev_is_8) << 1 | (alloc);
+}
+
+static inline word GET_PREV8(byte* bp) {
+    return GETWORD(HDRP(bp)) & 0x2;
+}
+
+static inline l8node *get_next_l8node(l8node *p_l8node) {
+    if (p_l8node -> next_offset == 0) return NULL;
+    return (l8node *) (heap_start + (p_l8node -> next_offset));
+}
+
+static inline word get_l8node_offset(l8node *p) {
+    if (!p) return 0;
+    return (word) ((dword) p - (dword) heap_start);
+}
+
+static inline void add_to_l8(l8node *p_l8node) {
+    p_l8node -> next_offset = get_l8node_offset(l8head);
+    l8head = p_l8node;
+}
+
+static inline void add_to_l16(l16node *p_l16node) {
+    p_l16node -> next = l16head;
+    l16head = p_l16node;
+}
+
+static inline void add_to_l24(l24node *p_l24node) {
+    p_l24node -> next = l24head;
+    l24head = p_l24node;
 }
 
 /*
- * Given a free block pointer bp, return the address of previous free block address
+ * Get the block size of a tree node
  */
-inline byte *get_freelist_prev(void *bp) {
-    return (byte *) *(((dword *) bp) + 1);
+static inline word size_tn(treenode *p_treenode) {
+    return GET_SIZE(HDRP(p_treenode));
 }
 
-static fl_node *freelist_head = 0;  /* Head pointer of the free list */
+/*
+ * Given a subtree root and a treenode pointer,
+ * append the pointer to the end of the mid list of the subtree root
+ */
+/*
+static inline void append_mid(treenode *root, treenode *p_treenode) {
+    treenode *p = root;
+    while (p -> mid) {
+        p = p -> mid;
+    }
+    p -> mid = p_treenode;
+}
+*/
 
-static byte *heap_start = 0;        /* The start of the heap */
+/*
+ * Insert the treenode pointer into the tree.
+ * If the treenode root doesn't exist, the new node becomes the root.
+ */
+static inline void insert_treenode(treenode *p_treenode) {
+    if (!root) {
+        root = p_treenode;
+        return;
+    }
+    word node_size = size_tn(p_treenode);
+    treenode **rover = &root;       /* 2 dimensional pointer to update node */
+    while (*rover) {
+        word rover_size = size_tn(*rover);
+        /* If an exact match is found, find the tail of the midlist */
+        if (node_size == rover_size) {
+            while (*rover) {
+                rover = &((*rover) -> mid);
+            }
+            break;
+        }
+        /* Go to left if the block size is smaller than rover's block size */
+        if (node_size < rover_size) {
+            rover = &((*rover) -> left);
+        }
+        /* Go to right if the block size is larger than rover's block size */
+        else {
+            rover = &((*rover) -> right);
+        }
+    }
+    /* If we found the value in where rover points to is NULL,
+     * just update the value in where rover points to as the new node addr */
+    *rover = p_treenode;
+}
 
-static inline void delete_freelist_node (fl_node *p) {
-    if (p -> prev) {
-        p -> prev -> next = p -> next;
+static inline void * get_prev_bp(byte *bp) {
+    if (GET_PREV8(bp)) {
+        return (void *) (bp - DSIZE);
     }
     else {
-        freelist_head = p -> next;
-    }
-    if (p -> next) {
-        p -> next -> prev = p -> prev;
+        size_t prev_blksz = GET_SIZE(bp - DSIZE);
+        return (void *) (bp - prev_blksz);
     }
 }
 
 static void *coalesce (void *bp) {
-    word prev_alloc = GET_ALLOC(PREV_FTRP(bp));
-    word next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
-
-    byte *next_bp = NEXT_BLKP(bp);
-    byte *prev_bp = PREV_BLKP(bp);
-
-    fl_node *bp_node = (fl_node *) bp;
-    fl_node *bp_next_node = (fl_node *) next_bp;
-    fl_node *bp_prev_node = (fl_node *) prev_bp;
-
-    if (prev_alloc && next_alloc) {         /* Case 1 */
-        return bp;
-    }
-
-    else if (prev_alloc && !next_alloc) {   /* Case 2 */
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUTWORD(HDRP(bp), PACK(size, 0));
-        PUTWORD(FTRP(bp), PACK(size,0));
-        /* delete bp_next_node from freelist */
-        delete_freelist_node(bp_next_node);
-    }
-
-    else if (!prev_alloc && next_alloc) {      /* Case 3 */
-        //mm_checkheap(__LINE__);
-        size += GET_SIZE(HDRP(prev_bp));
-        PUTWORD(HDRP(prev_bp), PACK(size, 0));
-        PUTWORD(FTRP(prev_bp), PACK(size, 0));
-        /* delete bp_node from freelist */
-
-        delete_freelist_node(bp_prev_node);
-        bp_prev_node -> next = bp_node -> next;
-        bp_prev_node -> prev = bp_node -> prev;
-        if (bp_node -> prev) {
-            bp_node -> prev -> next = bp_prev_node;
-        }
-        else {
-            freelist_head = bp_prev_node;
-        }
-        if (bp_node -> next) {
-            bp_node -> next -> prev = bp_prev_node;
-        }
-
-        bp = prev_bp;
-        //mm_checkheap(__LINE__);
-        //printf("3.");
-    }
-
-    else {                                     /* Case 4 */
-        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
-        PUTWORD(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUTWORD(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        delete_freelist_node(bp_prev_node);
-        delete_freelist_node(bp_next_node);
-
-        bp_prev_node -> next = bp_node -> next;
-        bp_prev_node -> prev = bp_node -> prev;
-        if (bp_node -> prev) {
-            bp_node -> prev -> next = bp_prev_node;
-        }
-        else {
-            freelist_head = bp_prev_node;
-        }
-        if (bp_node -> next) {
-            bp_node -> next -> prev = bp_prev_node;
-        }
-
-        //printf("4.");
-        bp = prev_bp;
-    }
-
     return bp;
 }
 
 /* 
  * extend_heap - Extend heap with free block and return its block pointer
  */
-static void *extend_heap(size_t words) 
-{
+static void *extend_heap(size_t words, bool add_to_freelist) {
+    //TODO dwords?
     byte *bp;
     size_t size;
 
     /* Allocate an even number of words to maintain alignment */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE; 
     if (size < MIN_BLOCKSIZE) size = MIN_BLOCKSIZE;
-    if ((long)(bp = mem_sbrk(size)) == -1)  
+    if ((long) (bp = mem_sbrk(size)) == -1)  
         return NULL;                                        
 
-    /* Initialize free block header/footer and the epilogue header */
-    PUTWORD(HDRP(bp), PACK(size, 0));         /* Free block header */   
-    PUTWORD(FTRP(bp), PACK(size, 0));         /* Free block footer */   
-    ((fl_node *) bp) -> next = freelist_head; /* Free block next pointer */
-    ((fl_node *) bp) -> prev = NULL;          /* Free block prev pointer */
-    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */ 
-
-    if (freelist_head) {
-        freelist_head -> prev = (fl_node *) bp; /* Next block prev pointer */
+    bool prev8 = 0;
+    if (GET_PREV8(bp)) {
+        prev8 = 1;
     }
+    bool now8 = (size == 8);
+    
+    /* Initialize free block header/footer and the epilogue header */
+    PUTWORD(HDRP(bp), PACK(size, prev8, 0));         /* Free block header */
+    PUTWORD(FTRP(bp), PACK(size, prev8, 0));         /* Free block footer */
+    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, now8, 1));  /* New epilogue header */
 
-    /* Coalesce if the previous block was free */
-    dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
-    bp = coalesce(bp);
-    dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
-    freelist_head = (fl_node *) bp;
+    if (add_to_freelist) {
+        if (size == 8) {
+            l8node *p_l8node = (l8node *)bp;
+            add_to_l8(p_l8node);
+        }
+        else if (size == 16) {
+            l16node *p_l16node = (l16node *)bp;
+            add_to_l16(p_l16node);
+        }
+        else if (size == 24) {
+            l24node *p_l24node = (l24node *)bp;
+            add_to_l24(p_l24node);
+        }
+        else {
+            treenode *p_treenode = (treenode *)bp;
+            insert_treenode(p_treenode);
+        }
+
+        /* Coalesce if the previous block was free */
+        dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
+        bp = coalesce(bp);
+        dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
+    }
 
     return bp;
 }
@@ -257,108 +282,65 @@ static void *extend_heap(size_t words)
  * Initialize: return -1 on error, 0 on success.
  */
 int mm_init(void) {
-    dbg_printf("\nmm_init, line %d\n", __LINE__);
-
-    /**
-     * |....|....|
-     * |pro |epi |
-     */
     if ((heap_start = mem_sbrk(DSIZE)) == (void *) -1) {
         return -1;
     }
-    PUTWORD(heap_start, PACK(0, 1)); /* Prologue footer, Alignment padding */
-    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1));      /* Epilogue header */
-    //mm_checkheap(__LINE__);
-    extend_heap(CHUNKSIZE / WSIZE);
-    freelist_head -> next = NULL;               /* Free block next pointer */
-    freelist_head -> prev = NULL;               /* Free block prev pointer */
-    //mm_checkheap(__LINE__);
+    PUTWORD(heap_start, PACK(0, 0, 1)); /* Prologue footer, Alignment padding */
+    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 0, 1));      /* Epilogue header */
+    extend_heap(CHUNKSIZE / WSIZE, 0);
     return 0;
 }
 
-static void *find_fit(size_t asize) {
+/*
+ * Find the best fit in the freetree, and detatch the found node from freetree.
+ * On failure, return NULL
+ * TODO NEXT
+ * Hope you've had a good night's sleep.
+ * Don't forget, this is the hardest one, so think straight before you start!
+ * You've slept for a clearer mind, so I trust you.
+ * And, also, don't forget that you can be one of the greatests!
+ */
+static void *find_best_tree_fit_and_detatch(size_t asize) {
+
+    return NULL;
+}
+
+/*
+ * Find the best fit for asize and detatch it from the freelist or freetree.
+ * On failure, return NULL
+ */
+static void *find_fit_and_detatch(size_t asize) {
     void *ret = NULL; /* Default: no fit */
-    fl_node *p_node;
-    /* First-fit */
-    /*
-    for (p_node = freelist_head; p_node; p_node = p_node -> next) {
-        void *bp = (void *)p_node;
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            return bp;
+    if (asize == 8) {
+        if (l8head) {
+            ret = l8head;
+            l8head = get_next_l8node(l8head);
+            return ret;
+        }
+        else if (l16head) {
+            ret = l16head;
+            l16head = l16head -> next;
+            return l16head;
+        }
+        else if (l24head) {
+            ret = l24head;
+            l24head = l24head -> next;
+            return l24head;
+        }
+        else {
+            ret = find_best_tree_fit_and_detatch(asize);
+            if (ret) return ret;
         }
     }
-    */
-    /* Best-fit */
-    size_t min_size = UINT_MAX;
-    for (p_node = freelist_head; p_node; p_node = p_node -> next) {
-        void *bp = (void *)p_node;
-        if (!GET_ALLOC(HDRP(bp))) {
-            word block_size = GET_SIZE(HDRP(bp));
-            if (asize == block_size) {
-                return bp;
-            }
-            else if (asize < block_size  && block_size < min_size) {
-                ret = bp;
-                min_size = block_size;
-            }
-        }
-    }
+    /* No fit found. Get more memory and place the block */
+    size_t extendsize = MAX(asize, CHUNKSIZE);
+    if ((ret = extend_heap(extendsize / WSIZE, 1)) == NULL)
+        return NULL;
     return ret;
 }
 
-/* 
- * place - Place block of asize bytes at start of free block bp 
- *         and split if remainder would be at least minimum block size
- */
-// TODO NEXT.
-// First go over design of malloc and free.
 static void place(void *bp, size_t asize) {
-    size_t csize = GET_SIZE(HDRP(bp));   
-    fl_node *bp_node = (fl_node *) bp;
-    if ((csize - asize) >= MIN_BLOCKSIZE) { 
-        /* If remaining block is larger than or equal to minimum block size,
-         * split the block into two blocks and allocate the first one */
-        /* Allocate current block */
-        PUTWORD(HDRP(bp), PACK(asize, 1));
-        PUTWORD(FTRP(bp), PACK(asize, 1));
-        /* Construct freelist */
-        void *newbp = NEXT_BLKP(bp);
-        fl_node *newbp_node = (fl_node *) newbp;
-
-        /* Assign old prev and next pointers to new freelist node */
-        newbp_node -> prev = bp_node -> prev;
-        newbp_node -> next = bp_node -> next;
-        /* Detatch and assign prev and next pointers for prev and next node */
-        if (bp_node -> prev == NULL) {
-            freelist_head = newbp_node;
-        }
-        else {
-            bp_node -> prev -> next = newbp_node;
-        }
-        if (bp_node -> next != NULL) {
-            bp_node -> next -> prev = newbp_node;
-        }
-
-        /* Construct the boundary tags for the remaining block of memory */
-        PUTWORD(HDRP(newbp), PACK(csize-asize, 0));
-        PUTWORD(FTRP(newbp), PACK(csize-asize, 0));
-    }
-    else { 
-        /* If remaining block is smaller than minimum block size,
-         * allocate the whole block */
-        /* Allocate current block */
-        PUTWORD(HDRP(bp), PACK(csize, 1));
-        PUTWORD(FTRP(bp), PACK(csize, 1));
-        if (bp_node -> prev == NULL) {
-            freelist_head = bp_node -> next;
-        }
-        else {
-            bp_node -> prev -> next = bp_node -> next;
-        }
-        if (bp_node -> next != NULL) {
-            bp_node -> next -> prev = bp_node -> prev;
-        }
-    }
+    //TODO deal with prev8
 }
 
 /*
@@ -366,11 +348,9 @@ static void place(void *bp, size_t asize) {
  */
 void *malloc (size_t size) {
     dbg_printf("malloc, size = %u\n", (word)size);
-    //mm_checkheap(__LINE__);
     size_t asize;      /* Adjusted block size */
-    size_t extendsize; /* Amount to extend heap if no fit */
     byte *bp;      
-    if (freelist_head == NULL) {
+    if (heap_start == 0) {
         mm_init();
     }
 
@@ -379,89 +359,45 @@ void *malloc (size_t size) {
         return NULL;
     }
 
-    if (size < DSIZE) {
-        asize = MIN_BLOCKSIZE + DSIZE;
+    if (size < WSIZE) {
+        asize = DSIZE;
     }
     else {
-        asize = MIN_BLOCKSIZE + ROUNDUP_DIV(size, DSIZE) * DSIZE;
-    }
-    if ((bp = find_fit(asize)) != NULL) {
-        //mm_checkheap(__LINE__);
-        place(bp, asize);
-        //mm_checkheap(__LINE__);
-        return bp;
+        asize = ROUNDUP_DIV((WSIZE + size), DSIZE) * DSIZE;
     }
 
-    /* No fit found. Get more memory and place the block */
-    extendsize = MAX(asize, CHUNKSIZE);                 
-    if ((bp = extend_heap(extendsize / WSIZE)) == NULL)  
-        return NULL;                                  
-    //mm_checkheap(__LINE__);
-    place(bp, asize);                                 
-    //mm_checkheap(__LINE__);
-    return bp;
+    if ((bp = find_fit_and_detatch(asize)) != NULL) {
+        //place(bp, asize);
+        //return bp;
+    }
+    return NULL;
 }
 
 /*
  * free
  */
 void free (void *bp) {
-    dbg_printf("free, bp = %llx\n", (dword)bp);
-    if (bp == 0) return;
+    if(!bp) return;
     size_t size = GET_SIZE(HDRP(bp));
-    //if (freelist_head == 0) {
-        //mm_init();
-    //}
+    word prev8 = GET_PREV8(bp);
     /* Put new boundary tags around the block to free */
-    PUTWORD(HDRP(bp), PACK(size, 0));
-    PUTWORD(FTRP(bp), PACK(size, 0));
-    fl_node *bp_node = (fl_node *) bp;
-    bp_node -> next = freelist_head;
-    bp_node -> prev = NULL;
-    if (freelist_head) {
-        freelist_head -> prev = bp_node;
+    PUTWORD(HDRP(bp), PACK(size, prev8, 0));
+    if (size > 8) {
+        PUTWORD(FTRP(bp), PACK(size, prev8, 0));
     }
-    freelist_head = bp_node;
-
-    dbg_printf("Before free coalescing\n");
+    //TODO consider dealing with prev8 tag
+    if (size == 8) add_to_l8((l8node *) bp);
+    else if (size == 16) add_to_l16((l16node *) bp);
+    else if (size == 24) add_to_l24((l24node *) bp);
+    else insert_treenode((treenode *) bp);
     coalesce(bp);
-    dbg_printf("After free coalescing\n");
 }
 
 /*
  * realloc - you may want to look at mm-naive.c
  */
 void *realloc(void *oldptr, size_t size) {
-    size_t oldsize;
-    void *newptr;
-
-    /* If size == 0 then this is just free, and we return NULL. */
-    if(size == 0) {
-        free(oldptr);
-        return 0;
-    }
-
-    /* If oldptr is NULL, then this is just malloc. */
-    if(oldptr == NULL) {
-        return malloc(size);
-    }
-
-    newptr = malloc(size);
-
-    /* If realloc() fails the original block is left untouched  */
-    if(!newptr) {
-        return 0;
-    }
-
-    /* Copy the old data. */
-    oldsize = GET_SIZE(HDRP(oldptr));
-    if(size < oldsize) oldsize = size;
-    memcpy(newptr, oldptr, oldsize);
-
-    /* Free the old block. */
-    free(oldptr);
-
-    return newptr;
+    return NULL;
 }
 
 /*
@@ -470,13 +406,7 @@ void *realloc(void *oldptr, size_t size) {
  * needed to run the traces.
  */
 void *calloc (size_t nmemb, size_t size) {
-    size_t bytes = nmemb * size;
-    void *newptr;
-
-    newptr = malloc(bytes);
-    memset(newptr, 0, bytes);
-
-    return newptr;
+    return NULL;
 }
 
 
@@ -500,97 +430,4 @@ static int aligned(const void *p) {
  * mm_checkheap
  */
 void mm_checkheap(int lineno) {
-    /* Check heap_start */
-    if (mem_heap_lo() != heap_start) {
-        checkheap_printf(lineno, "mem_heap_lo() != heap_start\n");
-    }
-
-    /* Check epilogue block */
-    byte *heap_end = mem_heap_hi();
-    verbose_printf("heap_start = %llx, heap_end = %llx\n",
-            (dword) heap_start, (dword) heap_end);
-    if ((GETWORD(((byte *) heap_end) + 1 - WSIZE)) != 1) {
-        checkheap_printf(lineno, "epilogue block header is not 1\n");
-
-        printf("epilog block header addr is %llx, value is %d\n",
-                (dword)(((byte *) heap_end) + 1 - WSIZE),
-                (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
-    }
-
-    /* Check each block */
-    byte *bp = ((byte *) heap_start) + DSIZE;
-
-    bool prev_isfree = 0;
-    int freeblock_count = 0;
-    while (bp && bp < heap_end - 1) {
-        word header = GETWORD(HDRP(bp));
-        word footer = GETWORD(FTRP(bp));
-        /* Check header euqals footer */
-        //printf("header = %d, footer = %d\n", header, footer);
-        if (header != footer) {
-            printf("line %d: header != footer for bp = %llx, ",
-                    lineno, (dword) bp);
-            printf("header = %d, footer = %d\n", header, footer);
-        }
-        /* Check block size is larger than minimum block size */
-        if (GET_SIZE(HDRP(bp)) < MIN_BLOCKSIZE) {
-            checkheap_printf(lineno, "Header of bp size < MIN_BLOCKSIZE");
-        }
-        /* Check coalescing: no two consecutive free blocks in the heap */
-        if (GET_ALLOC(HDRP(bp)) == 0) {
-            freeblock_count++;
-            if (prev_isfree) {
-                checkheap_printf(lineno, "two consecutive free blocks");
-            }
-            prev_isfree = 1;
-        }
-        else {
-            prev_isfree = 0;
-        }
-
-        bp += GET_SIZE(HDRP(bp));
-    }
-    
-
-    /* Check loop in freelist */
-    fl_node *hare = freelist_head;
-    fl_node *tortoise = freelist_head;
-    while (tortoise && hare) {
-        tortoise = tortoise -> next;
-        hare = hare->next;
-        if (!hare) break;
-        hare = hare->next;
-        if (tortoise == hare) {
-            checkheap_printf(lineno, "loop presents in freelist next pointer");
-            break;
-        }
-    }
-
-    /* Check prev is correct */
-    fl_node *p_node = freelist_head;
-    while (p_node && p_node -> next) {
-        fl_node *old_p_node = p_node;
-        p_node = p_node -> next;
-        if (!in_heap(p_node)) {
-            checkheap_printf(lineno, "p_node is not in heap");
-        }
-        if (!in_heap(old_p_node)) {
-            checkheap_printf(lineno, "old_p_node is not in heap");
-        }
-        if (old_p_node != p_node -> prev) {
-            checkheap_printf(lineno, "old_p_node != p_node -> prev");
-            break;
-        }
-    }
-
-    int freelist_node_count = 0;
-    /* Check if blocks and free list nodes count match */
-    for (p_node = freelist_head; p_node; p_node = p_node -> next) {
-        freelist_node_count++;
-    }
-    if (freelist_node_count != freeblock_count) {
-        //printf("line %d: freelist_node_count = %d, freeblock_count = %d\n",
-                //lineno, freelist_node_count, freeblock_count);
-    }
 }
-
