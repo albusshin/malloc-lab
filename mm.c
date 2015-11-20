@@ -22,7 +22,7 @@
 # define dbg_printf(...)
 #endif
 
-#define CHECKHEAP
+#define CHECKHEAPx
 #ifdef CHECKHEAP
 #define checkheap_printf(l, m) printf("line %d: %s\n", l, m)
 #define cprintf(...) printf(__VA_ARGS__)
@@ -185,8 +185,8 @@ static inline void append_mid(treenode *root, treenode *p_treenode) {
  * If the treenode root doesn't exist, the new node becomes the root.
  */
 static inline void insert_treenode(treenode *p_treenode) {
-    dbg_printf("insert_treenode, root=%llx, p_treenode=%llx\n",
-            (dword) root, (dword) p_treenode);
+    dbg_printf("insert_treenode, root=%llx, p_treenode=%llx, size = %u\n",
+            (dword) root, (dword) p_treenode, (word) size_tn(p_treenode));
 
     if (!root) {
         root = p_treenode;
@@ -307,7 +307,7 @@ int mm_init(void) {
     PUTWORD(heap_start, PACK(0, 0, 1)); /* Prologue footer, Alignment padding */
     PUTWORD(heap_start + (1 * WSIZE), PACK(0, 0, 1));      /* Epilogue header */
     extend_heap(CHUNKSIZE / WSIZE, 1);
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     return 0;
 }
 
@@ -458,7 +458,7 @@ static void *find_fit_and_detatch(size_t asize) {
         }
     default:
         ret = find_best_tree_fit_and_detatch(asize);
-        dbg_printf("best tree fit ret == %llx", (dword) ret);
+        dbg_printf("best tree fit ret == %llx\n", (dword) ret);
         if (ret) return ret;
     }
     /* No fit found. Get more memory and place the block */
@@ -541,7 +541,7 @@ static void place(void *bp, size_t asize) {
  * malloc
  */
 void *malloc (size_t size) {
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     dbg_printf("malloc, size = %u\n", (word)size);
     size_t asize;      /* Adjusted block size */
     byte *bp;      
@@ -554,15 +554,16 @@ void *malloc (size_t size) {
         return NULL;
     }
 
-    if (size < WSIZE) {
+    if (size <= WSIZE) {
         asize = DSIZE;
     }
     else {
-        asize = ROUNDUP_DIV((WSIZE + size), DSIZE) * DSIZE;
+        asize = ROUNDUP_DIV(size, DSIZE) * DSIZE + MIN_BLOCKSIZE;
     }
 
     if ((bp = find_fit_and_detatch(asize)) != NULL) {
         //dbg_printf("bp = find_fit_and_detatch(asize) == %llx\n", (dword) bp);
+        dbg_printf("Before place, asize == %u, bp == %llx\n", (word) asize, (dword) bp);
         place(bp, asize);
         dbg_printf("After place, bp == %llx\n", (dword) bp);
         return bp;
@@ -594,7 +595,7 @@ void free (void *bp) {
         insert_treenode(bp_treenode);
     }
     coalesce(bp);
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
 }
 
 /*
@@ -738,9 +739,11 @@ void mm_checkheap(int lineno) {
             word footer = GETWORD(FTRP(bp));
             /* Check header euqals footer */
             if (header != footer) {
-                cprintf("line %d: header != footer for bp = %llx, ",
-                        lineno, (dword) bp);
-                cprintf("header = %d, footer = %d\n", header, footer);
+                cprintf("line %d: header != footer for bp = %llx, headerp == %llx, footerp == %llx\n",
+                        lineno, (dword) bp, (dword) HDRP(bp), (dword)FTRP(bp));
+                cprintf("header = %x footer = %x\n", header, footer);
+                //TODO debugging.
+                exit(-1);
             }
         }
         /* Check block size is smaller than minimum block size */
