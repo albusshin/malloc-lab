@@ -63,10 +63,11 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<12)  /* Extend heap by this amount (bytes) */  
+#define CHUNKSIZE  (1<<4)  /* Extend heap by this amount (bytes) */  
 #define MIN_BLOCKSIZE 24    /* Minimum block size for explicit free list */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
+#define MIN(x, y) ((x) < (y)? (x) : (y))  
 
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc)  ((size) | (alloc)) 
@@ -97,6 +98,7 @@
 /* Round up division for positive integers */
 #define ROUNDUP_DIV(x, y)   ((((x) - 1) / (y)) + 1)
 
+#define UINT_MAX 0xFFFFFFFF;
 
 typedef int bool;
 
@@ -275,15 +277,33 @@ int mm_init(void) {
 }
 
 static void *find_fit(size_t asize) {
+    void *ret = NULL; /* Default: no fit */
     fl_node *p_node;
     /* First-fit */
+    /*
     for (p_node = freelist_head; p_node; p_node = p_node -> next) {
         void *bp = (void *)p_node;
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
             return bp;
         }
     }
-    return NULL; /* No fit */
+    */
+    /* Best-fit */
+    size_t min_size = UINT_MAX;
+    for (p_node = freelist_head; p_node; p_node = p_node -> next) {
+        void *bp = (void *)p_node;
+        if (!GET_ALLOC(HDRP(bp))) {
+            word block_size = GET_SIZE(HDRP(bp));
+            if (asize == block_size) {
+                return bp;
+            }
+            else if (asize < block_size  && block_size < min_size) {
+                ret = bp;
+                min_size = block_size;
+            }
+        }
+    }
+    return ret;
 }
 
 /* 
