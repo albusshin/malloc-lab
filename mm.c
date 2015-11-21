@@ -264,9 +264,6 @@ static inline void add_to_l24(l24node *p_l24node) {
 }
 
 static void delete_l8node(l8node *p_l8node) {
-    //TODO DEBUGGING
-    //if (!l8head) return;
-    //else
     dbg_printf("[call]\t delete_l8node, p_l8node == %llx\n", (dword) p_l8node);
         if (p_l8node == l8head) l8head = get_next_l8node(l8head);
     else {
@@ -275,8 +272,6 @@ static void delete_l8node(l8node *p_l8node) {
         while (p && (pnext = TOPTR(p -> next)) != p_l8node) {
             p = pnext;
         }
-    //TODO DEBUGGING
-        //if (!p) return;
         p -> next = p_l8node -> next;
     }
 }
@@ -323,7 +318,6 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
     dbg_printf("leftchild == %llx, midchild == %llx, rightchild == %llx, parent == %llx\n",
             (dword) leftchild, (dword) midchild, (dword) rightchild, (dword) parent);
 
-    //TODO note this error.
     if (ret -> mid) {
         /* Updating the parent information */
         if (!parent) {
@@ -344,14 +338,10 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
     }
     else {
         /* ret doesn't have mid child, need to reconfigure tree.
-         *
-         *                X <--- Needs to be deleted
-         *           X         X
-         *        X  X  X   X  X  X
          */
         if (!ret -> left && !ret -> right) {
             /* Case 1: left and right child of nowroot both NULL, hence leaf */
-            if (!ret -> parent) {
+            if (!parent) {
                 /* ret is root */
                 root = NULL;
             }
@@ -386,7 +376,15 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
                 leftchild -> parent = TOOFST(parent);
             }
         }
-        else { /* (ret -> left && ret -> right) */
+        else { /* (ret -> left && ret -> right)
+                *
+                *                X <--- Needs to be deleted
+                *           X         X
+                *        X  X  X   X  X  X
+                *                  ^
+                *                  |
+                *                  The node to replace ret
+                */
             /* Get the smallest node on the right subtree */
             treenode *rightleast = get_right_treenode(ret);
             if (rightleast -> left) {
@@ -469,9 +467,10 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
     return ret;
 }
 
-static treenode * delete_treenode(treenode *ret) {
+static inline treenode * delete_treenode(treenode *ret) {
     dbg_printf("[call]\tdelete_treenode, ret = %llx\n", (dword) ret);
     treenode *parent = get_parent_treenode(ret);
+
     if (parent && (TOOFST(ret) == parent -> mid)) {
         /* ret is mid child of parent, update list pointers. */
         parent -> mid = ret -> mid;
@@ -510,6 +509,7 @@ static void insert_treenode(treenode *p_treenode) {
     }
     word node_size = size_tn(p_treenode);
     word rootword = TOOFST(root);
+    word p_treenodeword = TOOFST(p_treenode);
     /* pointer to the offset inside a treenode */
     word *rover = &rootword;
     treenode *parent = 0;
@@ -518,14 +518,41 @@ static void insert_treenode(treenode *p_treenode) {
         word rover_size = size_tn(p_rover);
         //dbg_printf("rover_size == %u, p_treenode size=%u\n",
                 //rover_size, node_size);
-        /* If an exact match is found, find the tail of the midlist */
+        /* If an exact match is found, replace the head of the midlist */
         if (node_size == rover_size) {
+            treenode *roverleft = get_left_treenode(p_rover);
+            treenode *roverright = get_right_treenode(p_rover);
+            //treenode *roverparent = get_parent_treenode(p_rover);
+            //treenode *rovermid = get_mid_treenode(p_rover);
+
+                p_treenode -> left = p_rover -> left;
+                p_treenode -> right = p_rover -> right;
+                if (p_rover -> left) roverleft -> parent = p_treenodeword;
+                if (p_rover -> right) roverright -> parent = p_treenodeword;
+                p_rover -> left = 0;
+                p_rover -> right = 0;
+                p_treenode -> mid = *rover;
+                p_rover -> parent = p_treenodeword;
+
+            if (!parent) {
+                /* p_rover doesn't have parent, update root */
+                root = p_treenode;
+                p_treenode -> parent = 0;
+            }
+            else {
+                if (parent -> left == *rover) parent -> left = p_treenodeword;
+                else parent -> right = p_treenodeword;
+                p_treenode -> parent = TOOFST(parent);
+            }
+            /*
             while (*rover) {
                 parent = p_rover;
                 rover = &(p_rover -> mid);
                 p_rover = (treenode *) TOPTR(*rover);
             }
-            break;
+            */
+
+            return;
         }
         /* Go to left if the block size is smaller than rover's block size */
         else if (node_size < rover_size) {
@@ -540,7 +567,7 @@ static void insert_treenode(treenode *p_treenode) {
     }
     /* If we found the value in where rover points to is NULL,
      * just update the value in where rover points to as the new node addr */
-    *rover = TOOFST(p_treenode);
+    *rover = p_treenodeword;
     p_treenode -> parent = TOOFST(parent);
 }
 
@@ -572,6 +599,13 @@ static void delete_bp_from_freelist(void *bp, size_t size) {
 }
 
 static void add_bp_to_freelist(void *bp, size_t size) {
+    /* Put next block's header and possibly footer tag
+     * to indicate its prev block is free*/
+    void * next_bp = NEXT_BLKP(bp);
+    SET_PREV8(next_bp, size == 8);
+    SET_PREVFREE(next_bp, 1);
+    SET_FOOTER(next_bp);
+
     dbg_printf("[call]\tadd_bp_to_freelist, bp = %llx, size = %u\n", (dword) bp, (word) size);
     treenode *p_treenode = (treenode *)bp;
     switch (size) {
@@ -597,7 +631,6 @@ static void add_bp_to_freelist(void *bp, size_t size) {
 
 static void *coalesce (void *bp) {
     dbg_printf("[call]\tcoalesce, bp = %llx\n", (dword) bp);
-    //mm_checkheap(__LINE__);
 
     byte *next_bp = NEXT_BLKP(bp);
     word prev_alloc = !GET_PREVFREE(bp);
@@ -625,11 +658,6 @@ static void *coalesce (void *bp) {
         SET_FOOTER(bp);
         add_bp_to_freelist(bp, size);
         
-        /* Tell next block this block is free */
-        next_bp = NEXT_BLKP(bp);
-        SET_PREV8(next_bp, size == 8);
-        SET_PREVFREE(next_bp, 1);
-        SET_FOOTER(next_bp);
         dbg_printf("[after coalescing]\t 2, bp = %llx, next_bp = %llx, size = %u, next_size = %u, header = %u\n",
                 (dword)bp, (dword)next_bp, (word)size, (word)next_size, (word)GETWORD(HDRP(bp)));
     } else {                                /* !prev_alloc */
@@ -662,11 +690,6 @@ static void *coalesce (void *bp) {
             add_bp_to_freelist(prev_bp, size);
             bp = prev_bp;
 
-            /* Tell next block this block is free */
-            next_bp = NEXT_BLKP(bp);
-            SET_PREV8(next_bp, size == 8);
-            SET_PREVFREE(next_bp, 1);
-            SET_FOOTER(next_bp);
             dbg_printf("[after coalescing]\t 3, bp = %llx, prev_bp = %llx, size = %u, prev_size = %u, header = %u\n",
                 (dword)bp, (dword)prev_bp, (word)size, (word)prev_size, (word)GETWORD(HDRP(bp)));
         }
@@ -683,11 +706,6 @@ static void *coalesce (void *bp) {
             add_bp_to_freelist(prev_bp, size);
             bp = prev_bp;
 
-            /* Tell next block this block is free */
-            next_bp = NEXT_BLKP(bp);
-            SET_PREV8(next_bp, size == 8);
-            SET_PREVFREE(next_bp, 1);
-            SET_FOOTER(next_bp);
             dbg_printf("[after coalescing]\t 4, bp = %llx, prev_bp = %llx, next_bp = %llx, size = %u, prev_size = %u\n, next_size = %u, header = %u\n",
                 (dword)bp, (dword)prev_bp, (dword)next_bp, (word)size, (word)prev_size, (word)next_size, (word)GETWORD(HDRP(bp)));
         }
@@ -699,22 +717,21 @@ static void *coalesce (void *bp) {
 /* 
  * extend_heap - Extend heap with free block and return its block pointer
  */
-static void *extend_heap(size_t words) {
-    //TODO dwords?
+static void *extend_heap(size_t dwords) {
     byte *bp;
     size_t size;
 
     /* Allocate an even number of words to maintain alignment */
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE; 
 
-    dbg_printf("[call]\textend_heap, size = %u\n", //, add_to_freelist = %d\n",
-            (word) size);//, add_to_freelist);
+    size = dwords * DSIZE;
+
+    dbg_printf("[call]\textend_heap, size = %u\n", (word) size);
 
     if (size < MIN_BLOCKSIZE) size = MIN_BLOCKSIZE;
 
     //word *heap_end = (word *)((byte*) mem_heap_hi() + 1);
-    dbg_printf("[extend_heap] heap_end = %llx, p_epilogue = %llx, epilogue = %u\n",
-            (dword) heap_end, (dword) (heap_end - 1), *(heap_end - 1));
+    //dbg_printf("[extend_heap] heap_end = %llx, p_epilogue = %llx, epilogue = %u\n",
+            //(dword) heap_end, (dword) (heap_end - 1), *(heap_end - 1));
     if ((long) (bp = mem_sbrk(size)) == -1)  
         return NULL;                                        
 
@@ -724,8 +741,6 @@ static void *extend_heap(size_t words) {
     bool now8 = (size == 8);
     
     /* Initialize free block header/footer and the epilogue header */
-
-    //if (add_to_freelist) {
 
     dbg_printf("[extend_heap]\t prev8 = %u, prevfree = %u, now8 = %d, size = %u\n",
             (word) prev8, (word) prevfree, now8, (word) size);
@@ -737,15 +752,31 @@ static void *extend_heap(size_t words) {
     dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
     bp = coalesce(bp);
     dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
-    //}
-    //else {
-    //    //TODO TODO TODO utilization issue might occur
-    //    PUTWORD(HDRP(bp), PACK(size, prevfree, prev8, 1));  /* Free block header */
-    //    PUTWORD(FTRP(bp), PACK(size, prevfree, prev8, 1));  /* Free block footer */
-    //    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 0, now8, 1));  /* New epilogue header */
-    //}
     //mm_checkheap(__LINE__);
     return bp;
+}
+
+
+int g_treedepth = 0;
+int tmpdepth = 0;
+static int recur(treenode *root) {
+    int count = 0;
+    if (!root) return 0;
+    else {
+        tmpdepth++;
+        count = 1;
+        g_treedepth = MAX(g_treedepth, tmpdepth);
+        count += recur(get_left_treenode(root));
+        count += recur(get_right_treenode(root));
+        tmpdepth--;
+        return count;
+    }
+}
+static void profile_tree() {
+    g_treedepth = 0;
+    tmpdepth = 0;
+    int count = recur(root);
+    printf("[PROFILE]\tTree Depth: %d, Tree Nodes: %d\n", g_treedepth, count);
 }
 
 /*
@@ -764,7 +795,7 @@ int mm_init(void) {
 
     PUTWORD(heap_start, PACK(0, 0, 0, 1));        /* Prologue footer, padding */
     PUTWORD(heap_start + (1 * WSIZE), PACK(0, 0, 0, 1));   /* Epilogue header */
-    extend_heap(CHUNKSIZE / WSIZE);
+    extend_heap(ROUNDUP_DIV(CHUNKSIZE, DSIZE));
     return 0;
 }
 
@@ -807,27 +838,28 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
     if (!ret) return NULL;
 
     /* Found match, detatch the child from tree */
-    else if (ret -> mid) {
-        /* ret has mid child, no need to reconfigure tree.
-         *
-         *                X
-         *           X    X    X
-         *         X X X  X  X X X
-         *                X
-         *                X <--- Needs to be deleted and returned
-         */
-        treenode *parent = ret;
-        ret = get_mid_treenode(ret);
-        /* Detatch block from mid list */
-        parent -> mid = ret -> mid;
-        treenode *ret_mid = get_mid_treenode(ret);
-        if (ret_mid) {
-            ret_mid -> parent = ret -> parent;
-        }
-    }
-    else {
-        ret = delete_binary_treenode(ret, result_is_left);
-    }
+   // else if (ret -> mid) {
+   //     /* ret has mid child, no need to reconfigure tree.
+   //      *
+   //      *                X
+   //      *           X    X    X
+   //      *         X X X  X  X X X
+   //      *                X
+   //      *                X <--- Needs to be deleted and returned
+   //      */
+   //     
+   //     treenode *parent = ret;
+   //     ret = get_mid_treenode(ret);
+   //     /* Detatch block from mid list */
+   //     parent -> mid = ret -> mid;
+   //     treenode *ret_mid = get_mid_treenode(ret);
+   //     if (ret_mid) {
+   //         ret_mid -> parent = ret -> parent;
+   //     }
+   // }
+   // else {
+    ret = delete_binary_treenode(ret, result_is_left);
+    //}
     return ret;
 }
 
@@ -870,7 +902,7 @@ static void *find_fit_and_detatch(size_t asize) {
     }
     /* No fit found. Get more memory and place the block */
     size_t extendsize = MAX(asize, CHUNKSIZE);
-    if ((ret = extend_heap(extendsize / WSIZE)) == NULL)
+    if ((ret = extend_heap(ROUNDUP_DIV(extendsize, DSIZE))) == NULL)
         return NULL;
     return find_fit_and_detatch(asize);
 }
@@ -887,7 +919,6 @@ static void place (void *bp, size_t asize) {
          * split the block into two blocks and allocate the first one */
         /* Allocate current block, and
          * Assign to now block if previous block is 8 bytes */
-        word next8 = (remaining_size == 8); /* next block is 8 bytes */
 
         /* previous block must not be free */
         PUTWORD(HDRP(bp), PACK(asize, 0, prev8, 1));
@@ -897,42 +928,7 @@ static void place (void *bp, size_t asize) {
         PUTWORD(HDRP(newbp), PACK(remaining_size, 0, now8, 0));
         SET_FOOTER(newbp);
 
-        void *newbp_next = NEXT_BLKP(newbp);
-        if (next8) {
-            /* Assign to next next block if remaining block is 8 bytes */
-            SET_PREV8(newbp_next, 1);
-            SET_PREVFREE(newbp_next, 1);
-            SET_FOOTER(newbp_next);
-            /* add newbp to list8 */
-            add_to_l8((l8node *) newbp);
-        }
-        //TODO reordering if statements?
-        else if (remaining_size == 16) {
-            SET_PREV8(newbp_next, 0);
-            SET_PREVFREE(newbp_next, 1);
-            SET_FOOTER(newbp_next);
-            /* add newbp to list16 */
-            add_to_l16((l16node *) newbp);
-        }
-        else if (remaining_size == 24) {
-            SET_PREV8(newbp_next, 0);
-            SET_PREVFREE(newbp_next, 1);
-            SET_FOOTER(newbp_next);
-            /* add newbp to list24 */
-            add_to_l24((l24node *) newbp);
-        }
-        else { /* remaining_size > 24 */
-            SET_PREV8(newbp_next, 0);
-            SET_PREVFREE(newbp_next, 1);
-            SET_FOOTER(newbp_next);
-            /* add newbp to tree */
-            treenode *p_treenode = (treenode *) newbp;
-            p_treenode -> left = 0;
-            p_treenode -> mid = 0;
-            p_treenode -> right = 0;
-            p_treenode -> parent = 0;
-            insert_treenode(p_treenode);
-        }
+        add_bp_to_freelist(newbp, remaining_size);
         dbg_printf("[return]\tplace, bp = %llx, size = %u\n", (dword)bp, (word)asize);
     }
     else { 
@@ -997,23 +993,8 @@ void free (void *bp) {
     /* Put new boundary tags around the block to free */
     PUTWORD(HDRP(bp), (GETWORD(HDRP(bp)) & ~1));
     SET_FOOTER(bp);
-    /* Put next block's header and possibly footer tag
-     * to indicate its prev block is free*/
-    void * next_bp = NEXT_BLKP(bp);
-    SET_PREVFREE(next_bp, 1);
-    SET_FOOTER(next_bp);
 
-    if (size == 8) add_to_l8((l8node *) bp);
-    else if (size == 16) add_to_l16((l16node *) bp);
-    else if (size == 24) add_to_l24((l24node *) bp);
-    else {
-        treenode *bp_treenode = (treenode *) bp;
-        bp_treenode -> left = 0;
-        bp_treenode -> mid = 0;
-        bp_treenode -> right = 0;
-        bp_treenode -> parent = 0;
-        insert_treenode(bp_treenode);
-    }
+    add_bp_to_freelist(bp, size);
     coalesce(bp);
     //mm_checkheap(__LINE__);
 }
@@ -1177,7 +1158,6 @@ static void preorder_test(treenode *root) {
  * mm_checkheap
  */
 void mm_checkheap(int lineno) {
-    printf("\n\n");
     /* Check heap_start */
     if (mem_heap_lo() != heap_start) {
         checkheap_printf(lineno, "mem_heap_lo() != heap_start\n");
@@ -1194,9 +1174,9 @@ void mm_checkheap(int lineno) {
                 (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
     }
     if (GET_PREV8(((byte*) heap_end + 1))) {
-        checkheap_printf(lineno, "epilogue block header prev8 is set true.\n");
+        verbose_printf(lineno, "epilogue block header prev8 is set true.\n");
 
-        cprintf("epilog block header addr is %llx, value is %d\n",
+        verbose_printf("epilog block header addr is %llx, value is %d\n",
                 (dword)(((byte *) heap_end) + 1 - WSIZE),
                 (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
     }
@@ -1228,7 +1208,6 @@ void mm_checkheap(int lineno) {
         }
         /* Check block prev8 is true */
         if (GET_PREV8(bp)) {
-            cprintf("prev8\n");
             if (GET_SIZE(HDRP((byte *)bp - 8))!= 8) {
                 cprintf("line %d: prev8 flag is set in bp = %llx, but prev 8 block bp is not 8 bytes\n",
                         lineno, (dword) bp);
