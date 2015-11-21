@@ -144,11 +144,21 @@ static inline word PACK(size_t size, int prev_is_8, int alloc) {
 }
 */
 
-static inline word GET_PREV8(byte* bp) {
+static inline word GET_PREV8(byte *bp) {
     return (GETWORD(HDRP(bp)) & 0x2) >> 1;
 }
 
-static inline word GET_PREVFREE(byte* bp) {
+static inline void SET_PREV8(byte *bp, word prev8) {
+    word *hdrp = (word *)HDRP(bp);
+    if (prev8) {
+        PUTWORD(hdrp, (GETWORD(hdrp) | 0x2));
+    }
+    else {
+        PUTWORD(hdrp, (GETWORD(hdrp) & ~0x2));
+    }
+}
+
+static inline word GET_PREVFREE(byte *bp) {
     return (GETWORD(HDRP(bp)) & 0x4) >> 2;
 }
 
@@ -255,8 +265,10 @@ static inline void add_to_l24(l24node *p_l24node) {
 
 static void delete_l8node(l8node *p_l8node) {
     //TODO DEBUGGING
-    if (!l8head) return;
-    else if (p_l8node == l8head) l8head = get_next_l8node(l8head);
+    //if (!l8head) return;
+    //else
+    dbg_printf("[call]\t delete_l8node, p_l8node == %llx\n", (dword) p_l8node);
+        if (p_l8node == l8head) l8head = get_next_l8node(l8head);
     else {
         l8node *p = l8head;
         l8node *pnext = NULL;
@@ -264,12 +276,13 @@ static void delete_l8node(l8node *p_l8node) {
             p = pnext;
         }
     //TODO DEBUGGING
-        if (!p) return;
+        //if (!p) return;
         p -> next = p_l8node -> next;
     }
 }
 
 static void delete_l16node(l16node *p_l16node) {
+    dbg_printf("[call]\t delete_l16node, p_l16node == %llx\n", (dword) p_l16node);
     if (p_l16node == l16head) {
         l16head = get_next_l16node(l16head);
         if (l16head) {
@@ -285,6 +298,7 @@ static void delete_l16node(l16node *p_l16node) {
 }
 
 static void delete_l24node(l24node *p_l24node) {
+    dbg_printf("[call]\t delete_l24node, p_l24node == %llx\n", (dword) p_l24node);
     if (p_l24node == l24head) {
         l24head = get_next_l24node(l24head);
         if (l24head) {
@@ -311,7 +325,7 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
 
     //TODO note this error.
     if (ret -> mid) {
-            /* Updating the parent information */
+        /* Updating the parent information */
         if (!parent) {
             root = midchild;
             root -> parent = 0;
@@ -456,6 +470,7 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
 }
 
 static treenode * delete_treenode(treenode *ret) {
+    dbg_printf("[call]\tdelete_treenode, ret = %llx\n", (dword) ret);
     treenode *parent = get_parent_treenode(ret);
     if (parent && (TOOFST(ret) == parent -> mid)) {
         /* ret is mid child of parent, update list pointers. */
@@ -582,6 +597,7 @@ static void add_bp_to_freelist(void *bp, size_t size) {
 
 static void *coalesce (void *bp) {
     dbg_printf("[call]\tcoalesce, bp = %llx\n", (dword) bp);
+    //mm_checkheap(__LINE__);
 
     byte *next_bp = NEXT_BLKP(bp);
     word prev_alloc = !GET_PREVFREE(bp);
@@ -594,11 +610,12 @@ static void *coalesce (void *bp) {
         (dword) next_bp, (word) next_size, (word) next_alloc, (word)GETWORD(HDRP(next_bp)), (dword)HDRP(next_bp));
     dbg_printf("mem_heap_hi() == %llx\n", (dword) mem_heap_hi());
     if (prev_alloc && next_alloc) {         /* Case 1 */
-        dbg_printf("case 1\n");
+        dbg_printf("[coalescing]\t 1\n");
         return bp;
     }
     else if (prev_alloc && !next_alloc){    /* Case 2 */
-        dbg_printf("case 2\n");
+        dbg_printf("[coalescing]\t 2, bp = %llx, next_bp = %llx, size = %u, next_size = %u, header = %u\n",
+                (dword)bp, (dword)next_bp, (word)size, (word)next_size, (word)GETWORD(HDRP(bp)));
         delete_bp_from_freelist(next_bp, next_size);
         delete_bp_from_freelist(bp, size);
 
@@ -610,68 +627,72 @@ static void *coalesce (void *bp) {
         
         /* Tell next block this block is free */
         next_bp = NEXT_BLKP(bp);
-        //if (GET_SIZE(next_bp) != 0) {       /* bypass epilogue block */
+        SET_PREV8(next_bp, size == 8);
+        SET_PREVFREE(next_bp, 1);
+        SET_FOOTER(next_bp);
+        dbg_printf("[after coalescing]\t 2, bp = %llx, next_bp = %llx, size = %u, next_size = %u, header = %u\n",
+                (dword)bp, (dword)next_bp, (word)size, (word)next_size, (word)GETWORD(HDRP(bp)));
+    } else {                                /* !prev_alloc */
+        byte *prev_bp;
+        size_t prev_size;
+        if (prev8) {
+            /* 8 byte blocks doesn't have footers */
+            prev_bp = ((byte *) bp) - 8;
+            prev_size = 8;
+        }
+        else {
+            /* previous free block in other sizes has footers */
+            prev_bp = PREV_BLKP(bp);
+            prev_size = GET_SIZE(HDRP(prev_bp));
+        }
+        /* If the previous previous block is 8 bytes */
+        word prev_prev8 = GET_PREV8(prev_bp);
+        if (next_alloc) {                   /* Case 3 */
+            dbg_printf("[coalescing]\t 3, bp = %llx, prev_bp = %llx, size = %u, prev_size = %u, header = %u\n",
+                (dword)bp, (dword)prev_bp, (word)size, (word)prev_size, (word)GETWORD(HDRP(bp)));
+            delete_bp_from_freelist(prev_bp, prev_size);
+            delete_bp_from_freelist(bp, size);
+            size += prev_size;
+
+            /* Previous previous block is not free,
+             * Previous previous block could be 8 bytes,
+             * Previous block is free*/
+            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            SET_FOOTER(prev_bp);
+            add_bp_to_freelist(prev_bp, size);
+            bp = prev_bp;
+
+            /* Tell next block this block is free */
+            next_bp = NEXT_BLKP(bp);
+            SET_PREV8(next_bp, size == 8);
             SET_PREVFREE(next_bp, 1);
             SET_FOOTER(next_bp);
-        //}
-    } else {                                /* !prev_alloc */
-       // byte *prev_bp;
-       // size_t prev_size;
-       // if (prev8) {
-       //     /* 8 byte blocks doesn't have footers */
-       //     prev_bp = ((byte *) bp) - 8;
-       //     prev_size = 8;
-       // }
-       // else {
-       //     /* previous free block in other sizes has footers */
-       //     prev_bp = PREV_BLKP(bp);
-       //     prev_size = GET_SIZE(HDRP(prev_bp));
-       // }
-       // /* If the previous previous block is 8 bytes */
-       // word prev_prev8 = GET_PREV8(prev_bp);
-       // if (next_alloc) {                   /* Case 3 */
-       //     dbg_printf("case 3\n");
-       //     delete_bp_from_freelist(prev_bp, prev_size);
-       //     delete_bp_from_freelist(bp, size);
-       //     size += prev_size;
+            dbg_printf("[after coalescing]\t 3, bp = %llx, prev_bp = %llx, size = %u, prev_size = %u, header = %u\n",
+                (dword)bp, (dword)prev_bp, (word)size, (word)prev_size, (word)GETWORD(HDRP(bp)));
+        }
+        else {                              /* Case 4 */
+            dbg_printf("[coalescing]\t 4, bp = %llx, prev_bp = %llx, next_bp = %llx, size = %u, prev_size = %u\n, next_size = %u, header = %u\n",
+                (dword)bp, (dword)prev_bp, (dword)next_bp, (word)size, (word)prev_size, (word)next_size, (word)GETWORD(HDRP(bp)));
+            delete_bp_from_freelist(prev_bp, prev_size);
+            delete_bp_from_freelist(next_bp, next_size);
+            delete_bp_from_freelist(bp, size);
+            size += prev_size + next_size;
 
-       //     /* Previous previous block is not free,
-       //      * Previous previous block could be 8 bytes,
-       //      * Previous block is free*/
-       //     PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-       //     SET_FOOTER(prev_bp);
-       //     add_bp_to_freelist(prev_bp, size);
-       //     bp = prev_bp;
+            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            SET_FOOTER(prev_bp);
+            add_bp_to_freelist(prev_bp, size);
+            bp = prev_bp;
 
-       //     /* Tell next block this block is free */
-       //     next_bp = NEXT_BLKP(bp);
-       //     //if (GET_SIZE(next_bp) != 0) {       /* bypass epilogue block */
-       //         SET_PREVFREE(next_bp, 1);
-       //         SET_FOOTER(next_bp);
-       //     //}
-       // }
-       // else {                              /* Case 4 */
-       //     dbg_printf("case 4\n");
-       //     delete_bp_from_freelist(prev_bp, prev_size);
-       //     delete_bp_from_freelist(next_bp, next_size);
-       //     delete_bp_from_freelist(bp, size);
-       //     size += prev_size + next_size;
-
-       //     PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-       //     SET_FOOTER(prev_bp);
-       //     add_bp_to_freelist(prev_bp, size);
-       //     bp = prev_bp;
-
-       //     /* Tell next block this block is free */
-       //     next_bp = NEXT_BLKP(bp);
-       //     //if (GET_SIZE(next_bp) != 0) {       /* bypass epilogue block */
-       //         SET_PREVFREE(next_bp, 1);
-       //         SET_FOOTER(next_bp);
-       //     //}
-       // }
+            /* Tell next block this block is free */
+            next_bp = NEXT_BLKP(bp);
+            SET_PREV8(next_bp, size == 8);
+            SET_PREVFREE(next_bp, 1);
+            SET_FOOTER(next_bp);
+            dbg_printf("[after coalescing]\t 4, bp = %llx, prev_bp = %llx, next_bp = %llx, size = %u, prev_size = %u\n, next_size = %u, header = %u\n",
+                (dword)bp, (dword)prev_bp, (dword)next_bp, (word)size, (word)prev_size, (word)next_size, (word)GETWORD(HDRP(bp)));
+        }
     }
     dbg_printf("[return]\tcoalesce, bp = %llx, size = %u\n", (dword) bp, (word)size);
-    //mm_checkheap(__LINE__);
     return bp;
 }
 
@@ -690,24 +711,32 @@ static void *extend_heap(size_t words) {
             (word) size);//, add_to_freelist);
 
     if (size < MIN_BLOCKSIZE) size = MIN_BLOCKSIZE;
+
+    //word *heap_end = (word *)((byte*) mem_heap_hi() + 1);
+    dbg_printf("[extend_heap] heap_end = %llx, p_epilogue = %llx, epilogue = %u\n",
+            (dword) heap_end, (dword) (heap_end - 1), *(heap_end - 1));
     if ((long) (bp = mem_sbrk(size)) == -1)  
         return NULL;                                        
 
     word prev8 = GET_PREV8(bp);
     word prevfree = GET_PREVFREE(bp);
+
     bool now8 = (size == 8);
     
     /* Initialize free block header/footer and the epilogue header */
 
     //if (add_to_freelist) {
+
+    dbg_printf("[extend_heap]\t prev8 = %u, prevfree = %u, now8 = %d, size = %u\n",
+            (word) prev8, (word) prevfree, now8, (word) size);
     PUTWORD(HDRP(bp), PACK(size, prevfree, prev8, 0));  /* Free block header */
     SET_FOOTER(bp);
     PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1, now8, 1));  /* New epilogue header */
     add_bp_to_freelist(bp, size);
     /* Coalesce if the previous block was free */
-    //dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
+    dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
     bp = coalesce(bp);
-    //dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
+    dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
     //}
     //else {
     //    //TODO TODO TODO utilization issue might occur
@@ -723,6 +752,7 @@ static void *extend_heap(size_t words) {
  * Initialize: return -1 on error, 0 on success.
  */
 int mm_init(void) {
+    dbg_printf("[initializing]\n");
     if ((heap_start = mem_sbrk(DSIZE)) == (void *) -1) {
         return -1;
     }
@@ -846,7 +876,7 @@ static void *find_fit_and_detatch(size_t asize) {
 }
 
 static void place (void *bp, size_t asize) {
-    //TODO deal with prev8
+    dbg_printf("[call]\tplace, bp = %llx, size = %u\n", (dword)bp, (word)asize);
     size_t csize = GET_SIZE(HDRP(bp));   
     word remaining_size = csize - asize;
     word prev8 = GET_PREV8(bp);         /* prev block is 8 bytes */
@@ -870,25 +900,29 @@ static void place (void *bp, size_t asize) {
         void *newbp_next = NEXT_BLKP(newbp);
         if (next8) {
             /* Assign to next next block if remaining block is 8 bytes */
-            PUTWORD(HDRP(newbp_next), (GETWORD(HDRP(newbp_next)) | 6));
+            SET_PREV8(newbp_next, 1);
+            SET_PREVFREE(newbp_next, 1);
             SET_FOOTER(newbp_next);
             /* add newbp to list8 */
             add_to_l8((l8node *) newbp);
         }
         //TODO reordering if statements?
         else if (remaining_size == 16) {
+            SET_PREV8(newbp_next, 0);
             SET_PREVFREE(newbp_next, 1);
             SET_FOOTER(newbp_next);
             /* add newbp to list16 */
             add_to_l16((l16node *) newbp);
         }
         else if (remaining_size == 24) {
+            SET_PREV8(newbp_next, 0);
             SET_PREVFREE(newbp_next, 1);
             SET_FOOTER(newbp_next);
             /* add newbp to list24 */
             add_to_l24((l24node *) newbp);
         }
         else { /* remaining_size > 24 */
+            SET_PREV8(newbp_next, 0);
             SET_PREVFREE(newbp_next, 1);
             SET_FOOTER(newbp_next);
             /* add newbp to tree */
@@ -899,6 +933,7 @@ static void place (void *bp, size_t asize) {
             p_treenode -> parent = 0;
             insert_treenode(p_treenode);
         }
+        dbg_printf("[return]\tplace, bp = %llx, size = %u\n", (dword)bp, (word)asize);
     }
     else { 
         /* If remaining block is smaller than minimum block size,
@@ -909,8 +944,10 @@ static void place (void *bp, size_t asize) {
 
         /* Update next block info */
         void *next_bp = NEXT_BLKP(bp);
+        /* Didn't change this block size, does't need to set next block's prev8 flag */
         SET_PREVFREE(next_bp, 0);
         SET_FOOTER(next_bp);
+        dbg_printf("[return]\tplace, bp = %llx, size = %u\n", (dword)bp, (word)csize);
     }
 }
 
@@ -919,7 +956,7 @@ static void place (void *bp, size_t asize) {
  */
 void *malloc (size_t size) {
     //mm_checkheap(__LINE__);
-    dbg_printf("malloc, size = %u\n", (word)size);
+    dbg_printf("[call]\tmalloc, size = %u\n", (word)size);
     size_t asize;      /* Adjusted block size */
     byte *bp;      
     if (heap_start == 0) {
@@ -946,6 +983,7 @@ void *malloc (size_t size) {
         dbg_printf("After place, bp == %llx\n", (dword) bp);
         return bp;
     }
+    //mm_checkheap(__LINE__);
     return NULL;
 }
 
@@ -964,6 +1002,7 @@ void free (void *bp) {
     void * next_bp = NEXT_BLKP(bp);
     SET_PREVFREE(next_bp, 1);
     SET_FOOTER(next_bp);
+
     if (size == 8) add_to_l8((l8node *) bp);
     else if (size == 16) add_to_l16((l16node *) bp);
     else if (size == 24) add_to_l24((l24node *) bp);
@@ -1121,7 +1160,7 @@ static void inorder_test(treenode *root) {
         cprintf("Tree inconsistent. prev == %u, now == %u\n",
                 (word) prev_size, (word) g_treenode_size);
     }
-    verbose_printf("%u, ", (word)g_treenode_size);
+    //verbose_printf("%u, ", (word)g_treenode_size);
     inorder_test(get_right_treenode(root));
 }
 
@@ -1129,7 +1168,7 @@ static void preorder_test(treenode *root) {
     if (!root) {
         return;
     }
-    printf("%u, ", (word) size_tn(root));
+    //verbose_printf("%u, ", (word) size_tn(root));
     preorder_test(get_left_treenode(root));
     preorder_test(get_right_treenode(root));
 }
@@ -1138,6 +1177,7 @@ static void preorder_test(treenode *root) {
  * mm_checkheap
  */
 void mm_checkheap(int lineno) {
+    printf("\n\n");
     /* Check heap_start */
     if (mem_heap_lo() != heap_start) {
         checkheap_printf(lineno, "mem_heap_lo() != heap_start\n");
@@ -1153,13 +1193,20 @@ void mm_checkheap(int lineno) {
                 (dword)(((byte *) heap_end) + 1 - WSIZE),
                 (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
     }
+    if (GET_PREV8(((byte*) heap_end + 1))) {
+        checkheap_printf(lineno, "epilogue block header prev8 is set true.\n");
+
+        cprintf("epilog block header addr is %llx, value is %d\n",
+                (dword)(((byte *) heap_end) + 1 - WSIZE),
+                (GETWORD(((byte *) heap_end) + 1 - WSIZE)));
+    }
 
     /* Check if the tree is in order */
     g_treenode_size = 0;
     inorder_test(root);
-    verbose_printf("\n");
+    //verbose_printf("\n");
     preorder_test(root);
-    verbose_printf("\n");
+    //verbose_printf("\n");
 
     /* Check each block */
     byte *bp = ((byte *) heap_start) + DSIZE;
@@ -1174,9 +1221,30 @@ void mm_checkheap(int lineno) {
             if (header != footer) {
                 cprintf("line %d: header != footer for bp = %llx, headerp == %llx, footerp == %llx\n",
                         lineno, (dword) bp, (dword) HDRP(bp), (dword)FTRP(bp));
-                cprintf("header = %x footer = %x\n", header, footer);
+                cprintf("header = 0x%x footer = 0x%x\n", header, footer);
+                //TODO debugging
+                //exit(-1);
             }
         }
+        /* Check block prev8 is true */
+        if (GET_PREV8(bp)) {
+            cprintf("prev8\n");
+            if (GET_SIZE(HDRP((byte *)bp - 8))!= 8) {
+                cprintf("line %d: prev8 flag is set in bp = %llx, but prev 8 block bp is not 8 bytes\n",
+                        lineno, (dword) bp);
+                }
+            else {
+                if (GET_PREVFREE(bp) && GET_ALLOC(HDRP((byte *)bp - 8))) {
+                    cprintf("line %d: prev is 8 bytes, but prevfree flag is set and prev block is not free. bp = %llx\n",
+                            lineno, (dword) bp);
+                }
+                else if (!GET_PREVFREE(bp) && !GET_ALLOC(HDRP((byte *)bp - 8))) {
+                    cprintf("line %d: prev is 8 bytes, but prevfree flag is not set and prev block is free. bp = %llx\n",
+                            lineno, (dword) bp);
+                }
+            }
+        }
+
         /* Check block size is smaller than minimum block size */
         if (GET_SIZE(HDRP(bp)) < MIN_BLOCKSIZE) {
             checkheap_printf(lineno, "Header of bp size < MIN_BLOCKSIZE");
@@ -1186,8 +1254,6 @@ void mm_checkheap(int lineno) {
         if (!GET_PREVFREE(bp) && prev_isfree) {
             checkheap_printf(lineno, "prev block is free, but prevfree flag is not marked");
             cprintf("bp = %llx\n", (dword) bp);
-            //TODO debugging
-            exit(-1);
         }
 
         if (GET_ALLOC(HDRP(bp)) == 0) {
@@ -1222,7 +1288,7 @@ void mm_checkheap(int lineno) {
         cprintf("l8 = %d, l16 = %d, l24 = %d, tree = %d\n",
                 l8size, l16size, l24size, treesize);
         //TODO debugging
-        exit(-1);
+        //exit(-1);
     }
 
 }
