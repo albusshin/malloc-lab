@@ -22,7 +22,7 @@
 # define dbg_printf(...)
 #endif
 
-#define CHECKHEAPx
+#define CHECKHEAP
 #ifdef CHECKHEAP
 #define checkheap_printf(l, m) printf("line %d: %s\n", l, m)
 #define cprintf(...) printf(__VA_ARGS__)
@@ -77,6 +77,7 @@
 
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp)  ((byte *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) 
+#define PREV_BLKP(bp)  ((byte *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
 
 /* Given block ptr bp, compute address of previous block footer */
 #define PREV_FTRP(bp)  ((byte *)(bp) - DSIZE)
@@ -127,6 +128,7 @@ static l16node     *l16head = 0;    /* 16 bytes block list head */
 static l24node     *l24head = 0;    /* 24 bytes block list head */
 static treenode    *root = 0;       /* tree root for >24 bytes blocks */
 
+static void insert_treenode(treenode *p_treenode);
 
 //TODO try using macros
 
@@ -185,11 +187,23 @@ static inline l8node *get_next_l8node(l8node *p_l8node) {
 }
 
 static inline l16node *get_next_l16node(l16node *p_l16node) {
+    if (p_l16node -> next == 0) return NULL;
     return (l16node *) TOPTR(p_l16node -> next);
 }
 
+static inline l16node *get_prev_l16node(l16node *p_l16node) {
+    if (p_l16node -> prev == 0) return NULL;
+    return (l16node *) TOPTR(p_l16node -> prev);
+}
+
 static inline l24node *get_next_l24node(l24node *p_l24node) {
+    if (p_l24node -> next == 0) return NULL;
     return (l24node *) TOPTR(p_l24node -> next);
+}
+
+static inline l24node *get_prev_l24node(l24node *p_l24node) {
+    if (p_l24node -> prev == 0) return NULL;
+    return (l24node *) TOPTR(p_l24node -> prev);
 }
 
 static inline treenode *get_left_treenode(treenode *p_treenode) {
@@ -232,6 +246,147 @@ static inline void add_to_l24(l24node *p_l24node) {
     l24head = p_l24node;
 }
 
+static void delete_l8node(l8node *p_l8node) {
+    if (p_l8node == l8head) l8head = get_next_l8node(l8head);
+    else {
+        l8node *p = l8head;
+        l8node *pnext = NULL;
+        while ((pnext = TOPTR(p -> next)) != p_l8node) {
+            p = pnext;
+        }
+        p -> next = p_l8node -> next;
+    }
+}
+
+static void delete_l16node(l16node *p_l16node) {
+    if (p_l16node == l16head) {
+        l16head = get_next_l16node(l16head);
+        if (l16head) {
+            l16head -> prev = 0;
+        }
+    }
+    else {
+        get_prev_l16node(p_l16node) -> next = p_l16node -> next;
+        if (p_l16node -> next) {
+            get_next_l16node(p_l16node) -> prev = p_l16node -> prev;
+        }
+    }
+}
+
+static void delete_l24node(l24node *p_l24node) {
+    if (p_l24node == l24head) {
+        l24head = get_next_l24node(l24head);
+        if (l24head) {
+            l24head -> prev = 0;
+        }
+    }
+    else {
+        get_prev_l24node(p_l24node) -> next = p_l24node -> next;
+        if (p_l24node -> next) {
+            get_next_l24node(p_l24node) -> prev = p_l24node -> prev;
+        }
+    }
+}
+
+static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
+    treenode *parent = get_parent_treenode(ret);
+    treenode *leftchild = get_left_treenode(ret);
+    treenode *rightchild = get_right_treenode(ret);
+    /* ret doesn't have mid child, need to reconfigure tree.
+     *
+     *                X <--- Needs to be deleted
+     *           X         X
+     *        X  X  X   X  X  X
+     */
+    if (!ret -> left && !ret -> right) {
+        /* Case 1: left and right child of nowroot both NULL, hence leaf */
+        if (!ret -> parent) {
+            /* ret is root */
+            root = NULL;
+        }
+        else {
+            if (is_left_child) parent -> left = 0;
+            else parent -> right = 0;
+        }
+    }
+    else if (!ret -> left && ret -> right) {
+        /* Case 2: left is NULL and right is not NULL */
+        if (!parent) {
+            /* ret is root */
+            root = rightchild;
+            root -> parent = 0;
+        }
+        else {
+            if (is_left_child) parent -> left = ret -> right;
+            else parent -> right = ret -> right;
+            rightchild -> parent = TOOFST(parent);
+        }
+    }
+    else if (ret -> left && !ret -> right) {
+        /* Case 3: left is not NULL and right is NULL */
+        if (!parent) {
+            /* ret is root */
+            root = leftchild;
+            root -> parent = 0;
+        }
+        else {
+            if (is_left_child) parent -> left = ret -> left;
+            else parent -> right = ret -> left;
+            leftchild -> parent = TOOFST(parent);
+        }
+    }
+    else { /* (ret -> left && ret -> right) */
+        //TODO balancing?
+        //TODO throughput. try O(1)? feasible? Or, evalutate O(n) between two.
+        /* Case 4: left and right both not NULL */
+        if (!parent) {
+            /* ret is root */
+            /* Save previous right pointer */
+            /*
+            root = leftchild;
+            root -> parent = 0;
+            rightchild -> parent = 0;
+            insert_treenode(rightchild);
+            */
+            root = rightchild;
+            root -> parent = 0;
+            leftchild -> parent = 0;
+            insert_treenode(leftchild);
+        }
+        else {
+            /*
+            if (is_left_child) parent -> left = ret -> left;
+            else parent -> right = ret -> left;
+            leftchild -> parent = TOOFST(parent);
+            insert_treenode(rightchild);
+            */
+            if (is_left_child) parent -> left = ret -> right;
+            else parent -> right = ret -> right;
+            rightchild -> parent = TOOFST(parent);
+            insert_treenode(leftchild);
+        }
+    }
+    return ret;
+}
+
+static treenode * delete_treenode(treenode *ret) {
+    treenode *parent = get_parent_treenode(ret);
+    if (parent && (TOOFST(ret) == parent -> mid)) {
+        /* ret is mid child of parent, update list pointers. */
+        parent -> mid = ret -> mid;
+        if (ret -> mid) {
+            get_mid_treenode(ret) -> parent = ret -> parent;
+        }
+    }
+    else {
+        bool is_left_child = 0;
+        if (parent)
+            is_left_child = (TOOFST(ret) == parent -> left);
+        ret = delete_binary_treenode(ret, is_left_child);
+    }
+    return ret;
+}
+
 /*
  * Get the block size of a tree node
  */
@@ -243,7 +398,7 @@ static inline word size_tn(treenode *p_treenode) {
  * Insert the treenode pointer into the tree.
  * If the treenode root doesn't exist, the new node becomes the root.
  */
-static inline void insert_treenode(treenode *p_treenode) {
+static void insert_treenode(treenode *p_treenode) {
     dbg_printf("insert_treenode, root=%llx, p_treenode=%llx, size = %u\n",
             (dword) root, (dword) p_treenode, (word) size_tn(p_treenode));
 
@@ -298,7 +453,106 @@ static inline void * get_prev_bp(byte *bp) {
     }
 }
 
+static void delete_bp_from_freelist(void *bp, size_t size) {
+    switch (size) {
+        case 8:
+            delete_l8node((l8node *) bp);
+            break;
+        case 16:
+            delete_l16node((l16node *) bp);
+            break;
+        case 24:
+            delete_l24node((l24node *) bp);
+            break;
+        default:
+            delete_treenode((treenode *) bp);
+            break;
+    }
+}
+
+static void add_bp_to_freelist(void *bp, size_t size) {
+    treenode *p_treenode = (treenode *)bp;
+    switch (size) {
+        case 8:
+            add_to_l8((l8node *) bp);
+            break;
+        case 16:
+            add_to_l16((l16node *) bp);
+            break;
+        case 24:
+            add_to_l24((l24node *) bp);
+            break;
+        default:
+            p_treenode -> left = 0;
+            p_treenode -> mid = 0;
+            p_treenode -> right = 0;
+            p_treenode -> parent = 0;
+            insert_treenode(p_treenode);
+            break;
+    }
+}
+
+
 static void *coalesce (void *bp) {
+    word prev_alloc = !GET_PREVFREE(bp);
+    word next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+    byte *next_bp = NEXT_BLKP(bp);
+    size_t next_size = GET_SIZE(HDRP(next_bp));
+    word prev8 = GET_PREV8(bp);
+
+    if (prev_alloc && next_alloc) {         /* Case 1 */
+        return bp;
+    }
+    else if (prev_alloc && !next_alloc){    /* Case 2 */
+        delete_bp_from_freelist(next_bp, next_size);
+        delete_bp_from_freelist(bp, size);
+
+        size += next_size;
+        /* prev is not free; prev can be 8 bytes; this block is free*/
+        PUTWORD(HDRP(bp), PACK(size, 0, prev8, 0));
+        PUTWORD(FTRP(bp), PACK(size, 0, prev8, 0));
+        add_bp_to_freelist(bp, size);
+    } else {                                /* !prev_alloc */
+        byte *prev_bp;
+        size_t prev_size;
+        if (prev8) {
+            /* 8 byte blocks doesn't have footers */
+            prev_bp = bp - 8;
+            prev_size = 8;
+        }
+        else {
+            /* previous free block in other sizes has footers */
+            prev_bp = PREV_BLKP(bp);
+            prev_size = GET_SIZE(HDRP(prev_bp));
+        }
+        /* If the previous previous block is 8 bytes */
+        word prev_prev8 = GET_PREV8(prev_bp);
+        if (next_alloc) {                   /* Case 3 */
+            delete_bp_from_freelist(prev_bp, prev_size);
+            delete_bp_from_freelist(bp, size);
+            size += prev_size;
+
+            /* Previous previous block is not free,
+             * Previous previous block could be 8 bytes,
+             * Previous block is free*/
+            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            add_bp_to_freelist(prev_bp, size);
+            bp = prev_bp;
+        }
+        else {                              /* Case 4 */
+            delete_bp_from_freelist(prev_bp, prev_size);
+            delete_bp_from_freelist(next_bp, next_size);
+            delete_bp_from_freelist(bp, size);
+            size += prev_size + next_size;
+
+            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+            add_bp_to_freelist(prev_bp, size);
+            bp = prev_bp;
+        }
+    }
     return bp;
 }
 
@@ -328,31 +582,7 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
     PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1, now8, 1));  /* New epilogue header */
 
     if (add_to_freelist) {
-        if (size == 8) {
-            //dbg_printf("size == 8\n");
-            l8node *p_l8node = (l8node *)bp;
-            add_to_l8(p_l8node);
-        }
-        else if (size == 16) {
-            //dbg_printf("size == 16\n");
-            l16node *p_l16node = (l16node *)bp;
-            add_to_l16(p_l16node);
-        }
-        else if (size == 24) {
-            //dbg_printf("size == 24\n");
-            l24node *p_l24node = (l24node *)bp;
-            add_to_l24(p_l24node);
-        }
-        else {
-            //dbg_printf("size > 24\n");
-            treenode *p_treenode = (treenode *)bp;
-            p_treenode -> left = 0;
-            p_treenode -> mid = 0;
-            p_treenode -> right = 0;
-            p_treenode -> parent = 0;
-            insert_treenode(p_treenode);
-        }
-
+        add_bp_to_freelist(bp, size);
         /* Coalesce if the previous block was free */
         //dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
         bp = coalesce(bp);
@@ -419,15 +649,16 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
         }
     }
     if (!ret) return NULL;
+
     /* Found match, detatch the child from tree */
     else if (ret -> mid) {
         /* ret has mid child, no need to reconfigure tree.
          *
          *                X
          *           X    X    X
-         *        X  X  X X X  X  X
+         *         X X X  X  X X X
          *                X
-         *                X <--- Needs to be returned
+         *                X <--- Needs to be deleted and returned
          */
         while (ret -> mid) {
             ret = get_mid_treenode(ret);
@@ -436,83 +667,7 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
         get_parent_treenode(ret) -> mid = 0;
     }
     else {
-        treenode *parent = get_parent_treenode(ret);
-        treenode *leftchild = get_left_treenode(ret);
-        treenode *rightchild = get_right_treenode(ret);
-        /* ret doesn't have mid child, need to reconfigure tree.
-         *
-         *                X <--- Needs to be returned
-         *           X         X
-         *        X  X  X   X  X  X
-         */
-        if (!ret -> left && !ret -> right) {
-            /* Case 1: left and right child of nowroot both NULL, hence leaf */
-            if (!ret -> parent) {
-                /* ret is root */
-                root = NULL;
-            }
-            else {
-                if (result_is_left) parent -> left = 0;
-                else parent -> right = 0;
-            }
-        }
-        else if (!ret -> left && ret -> right) {
-            /* Case 2: left is NULL and right is not NULL */
-            if (!parent) {
-                /* ret is root */
-                root = rightchild;
-                root -> parent = 0;
-            }
-            else {
-                if (result_is_left) parent -> left = ret -> right;
-                else parent -> right = ret -> right;
-                rightchild -> parent = TOOFST(parent);
-            }
-        }
-        else if (ret -> left && !ret -> right) {
-            /* Case 3: left is not NULL and right is NULL */
-            if (!parent) {
-                /* ret is root */
-                root = leftchild;
-                root -> parent = 0;
-            }
-            else {
-                if (result_is_left) parent -> left = ret -> left;
-                else parent -> right = ret -> left;
-                leftchild -> parent = TOOFST(parent);
-            }
-        }
-        else { /* (ret -> left && ret -> right) */
-            //TODO balancing?
-            //TODO throughput. try O(1)? feasible? Or, evalutate O(n) between two.
-            /* Case 4: left and right both not NULL */
-            if (!parent) {
-                /* ret is root */
-                /* Save previous right pointer */
-                /*
-                root = leftchild;
-                root -> parent = 0;
-                rightchild -> parent = 0;
-                insert_treenode(rightchild);
-                */
-                root = rightchild;
-                root -> parent = 0;
-                leftchild -> parent = 0;
-                insert_treenode(leftchild);
-            }
-            else {
-                /*
-                if (result_is_left) parent -> left = ret -> left;
-                else parent -> right = ret -> left;
-                leftchild -> parent = TOOFST(parent);
-                insert_treenode(rightchild);
-                */
-                if (result_is_left) parent -> left = ret -> right;
-                else parent -> right = ret -> right;
-                rightchild -> parent = TOOFST(parent);
-                insert_treenode(leftchild);
-            }
-        }
+        ret = delete_binary_treenode(ret, result_is_left);
     }
     return ret;
 }
@@ -624,7 +779,7 @@ static void place(void *bp, size_t asize) {
  * malloc
  */
 void *malloc (size_t size) {
-    //mm_checkheap(__LINE__);
+    mm_checkheap(__LINE__);
     dbg_printf("malloc, size = %u\n", (word)size);
     size_t asize;      /* Adjusted block size */
     byte *bp;      
@@ -813,31 +968,27 @@ void mm_checkheap(int lineno) {
 
     /* Check each block */
     byte *bp = ((byte *) heap_start) + DSIZE;
-    //bool prev_isfree = 0;
+    bool prev_isfree = 0;
     int freeblock_count = 0;
 
     while (bp && bp < heap_end - 1) {
         word header = GETWORD(HDRP(bp));
-        if (GET_SIZE(HDRP(bp)) != 8) {
+        if (GET_SIZE(HDRP(bp)) != 8 && !GET_ALLOC(HDRP(bp))) {
             word footer = GETWORD(FTRP(bp));
             /* Check header euqals footer */
             if (header != footer) {
                 cprintf("line %d: header != footer for bp = %llx, headerp == %llx, footerp == %llx\n",
                         lineno, (dword) bp, (dword) HDRP(bp), (dword)FTRP(bp));
                 cprintf("header = %x footer = %x\n", header, footer);
-                //TODO debugging.
-                exit(-1);
             }
         }
         /* Check block size is smaller than minimum block size */
         if (GET_SIZE(HDRP(bp)) < MIN_BLOCKSIZE) {
             checkheap_printf(lineno, "Header of bp size < MIN_BLOCKSIZE");
         }
+        /* Check coalescing: no two consecutive free blocks in the heap */
         if (GET_ALLOC(HDRP(bp)) == 0) {
             freeblock_count++;
-        }
-        /* Check coalescing: no two consecutive free blocks in the heap */
-        /* TODO supressing.
             if (prev_isfree) {
                 checkheap_printf(lineno, "two consecutive free blocks");
             }
@@ -846,7 +997,6 @@ void mm_checkheap(int lineno) {
         else {
             prev_isfree = 0;
         }
-        */
 
         bp += GET_SIZE(HDRP(bp));
     }
