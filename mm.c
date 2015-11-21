@@ -3,6 +3,7 @@
  *
  * NOTE TO STUDENTS: Replace this header comment with your own header
  * comment that gives a high level description of your solution.
+ *
  */
 #include <assert.h>
 #include <stdio.h>
@@ -56,7 +57,7 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<9)   /* Extend heap by this amount (bytes) */  
+#define CHUNKSIZE  (0x3<<6)   /* Extend heap by this amount (bytes) */  
 #define MIN_BLOCKSIZE 8     /* Minimum block size this implementation */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -757,28 +758,6 @@ static void *extend_heap(size_t dwords) {
 }
 
 
-int g_treedepth = 0;
-int tmpdepth = 0;
-static int recur(treenode *root) {
-    int count = 0;
-    if (!root) return 0;
-    else {
-        tmpdepth++;
-        count = 1;
-        g_treedepth = MAX(g_treedepth, tmpdepth);
-        count += recur(get_left_treenode(root));
-        count += recur(get_right_treenode(root));
-        tmpdepth--;
-        return count;
-    }
-}
-static void profile_tree() {
-    g_treedepth = 0;
-    tmpdepth = 0;
-    int count = recur(root);
-    printf("[PROFILE]\tTree Depth: %d, Tree Nodes: %d\n", g_treedepth, count);
-}
-
 /*
  * Initialize: return -1 on error, 0 on success.
  */
@@ -1152,6 +1131,31 @@ static void preorder_test(treenode *root) {
     //verbose_printf("%u, ", (word) size_tn(root));
     preorder_test(get_left_treenode(root));
     preorder_test(get_right_treenode(root));
+}
+
+int g_treedepth = 0;
+int g_tmpdepth = 0;
+static int profile_tree_recur(treenode *root) {
+    int count = 0;
+    if (!root) return 0;
+    else {
+        g_tmpdepth++;
+        count = 1;
+        g_treedepth = MAX(g_treedepth, g_tmpdepth);
+        count += profile_tree_recur(get_left_treenode(root));
+        count += profile_tree_recur(get_right_treenode(root));
+        g_tmpdepth--;
+        return count;
+    }
+}
+
+static void profile_tree() {
+    g_treedepth = 0;
+    g_tmpdepth = 0;
+#ifdef VERBOSE
+    int count = profile_tree_recur(root);
+#endif
+    verbose_printf("[PROFILE]\tTree Depth: %d, Tree Nodes: %d\n", g_treedepth, count);
 }
 
 /*
