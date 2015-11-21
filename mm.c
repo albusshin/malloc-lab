@@ -56,7 +56,7 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<7)   /* Extend heap by this amount (bytes) */  
+#define CHUNKSIZE  (1<<6)   /* Extend heap by this amount (bytes) */  
 #define MIN_BLOCKSIZE 8     /* Minimum block size this implementation */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -158,6 +158,12 @@ static inline void SET_PREVFREE(byte *bp, word prev_is_free) {
     }
     else {
         PUTWORD(hdrp, (GETWORD(hdrp) & ~0x4));
+    }
+}
+
+static inline void SET_FOOTER(byte *bp) {
+    if (GET_SIZE(HDRP(bp)) != 8 && !GET_ALLOC(HDRP(bp))) {
+        PUTWORD(FTRP(bp), GETWORD(HDRP(bp)));
     }
 }
 
@@ -336,35 +342,83 @@ static treenode * delete_binary_treenode(treenode *ret, bool is_left_child) {
         }
     }
     else { /* (ret -> left && ret -> right) */
-        //TODO balancing?
-        //TODO throughput. try O(1)? feasible? Or, evalutate O(n) between two.
-        /* Case 4: left and right both not NULL */
-        if (!parent) {
-            /* ret is root */
-            /* Save previous right pointer */
-            /*
-            root = leftchild;
-            root -> parent = 0;
-            rightchild -> parent = 0;
-            insert_treenode(rightchild);
-            */
-            root = rightchild;
-            root -> parent = 0;
-            leftchild -> parent = 0;
-            insert_treenode(leftchild);
+        /* Get the smallest node on the right subtree */
+        treenode *rightleast = get_right_treenode(ret);
+        if (rightleast -> left) {
+            while (rightleast -> left) {
+                rightleast = get_left_treenode(rightleast);
+            }
+            treenode *rightleast_parent = get_parent_treenode(rightleast);
+            treenode *rightleast_right = get_right_treenode(rightleast);
+            rightleast_parent -> left = rightleast -> right;
+            if (rightleast -> right) {
+                rightleast_right -> parent = rightleast -> parent;
+            }
+            rightleast -> left = ret -> left;
+            rightleast -> right = ret -> right;
+            if (ret -> left) {
+                leftchild -> parent = TOOFST(rightleast);
+            }
+            if (ret -> right) {
+                rightchild -> parent = TOOFST(rightleast);
+            }
+
+            /* And replace the ret's position with this one */
+            if (!parent) {
+                root = rightleast;
+                root -> parent = 0;
+            }
+
+            else {
+                if (is_left_child) parent -> left = TOOFST(rightleast);
+                else parent -> right = TOOFST(rightleast);
+                rightleast -> parent = ret -> parent;
+            }
         }
         else {
-            /*
-            if (is_left_child) parent -> left = ret -> left;
-            else parent -> right = ret -> left;
-            leftchild -> parent = TOOFST(parent);
-            insert_treenode(rightchild);
-            */
-            if (is_left_child) parent -> left = ret -> right;
-            else parent -> right = ret -> right;
-            rightchild -> parent = TOOFST(parent);
-            insert_treenode(leftchild);
+            /* rightleast is the first right child of ret */
+            if (!parent) {
+                root = rightleast;
+                root -> parent = 0;
+                root -> left = ret -> left;
+                leftchild -> parent = ret -> right;
+            }
+            else {
+                if (is_left_child) parent -> left = ret -> right;
+                else parent -> right = ret -> right;
+                rightleast -> parent = ret -> parent;
+                rightleast -> left = ret -> left;
+                leftchild -> parent = ret -> right;
+            }
         }
+
+//        //TODO balancing?
+//        //TODO throughput. try O(1)? feasible? Or, evalutate O(n) between two.
+//        /* Case 4: left and right both not NULL */
+//        if (!parent) {
+//            /*
+//            root = leftchild;
+//            root -> parent = 0;
+//            rightchild -> parent = 0;
+//            insert_treenode(rightchild);
+//            */
+//            root = rightchild;
+//            root -> parent = 0;
+//            leftchild -> parent = 0;
+//            insert_treenode(leftchild);
+//        }
+//        else {
+//            /*
+//            if (is_left_child) parent -> left = ret -> left;
+//            else parent -> right = ret -> left;
+//            leftchild -> parent = TOOFST(parent);
+//            insert_treenode(rightchild);
+//            */
+//            if (is_left_child) parent -> left = ret -> right;
+//            else parent -> right = ret -> right;
+//            rightchild -> parent = TOOFST(parent);
+//            insert_treenode(leftchild);
+//        }
     }
     return ret;
 }
@@ -399,7 +453,7 @@ static inline word size_tn(treenode *p_treenode) {
  * If the treenode root doesn't exist, the new node becomes the root.
  */
 static void insert_treenode(treenode *p_treenode) {
-    dbg_printf("insert_treenode, root=%llx, p_treenode=%llx, size = %u\n",
+    dbg_printf("[call]\tinsert_treenode, root=%llx, p_treenode=%llx, size = %u\n",
             (dword) root, (dword) p_treenode, (word) size_tn(p_treenode));
 
     if (!root) {
@@ -471,6 +525,7 @@ static void delete_bp_from_freelist(void *bp, size_t size) {
 }
 
 static void add_bp_to_freelist(void *bp, size_t size) {
+    dbg_printf("[call]\tadd_bp_to_freelist, bp = %llx, size = %u\n", (dword) bp, (word) size);
     treenode *p_treenode = (treenode *)bp;
     switch (size) {
         case 8:
@@ -494,66 +549,88 @@ static void add_bp_to_freelist(void *bp, size_t size) {
 
 
 static void *coalesce (void *bp) {
-    word prev_alloc = !GET_PREVFREE(bp);
-    word next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
-    byte *next_bp = NEXT_BLKP(bp);
-    size_t next_size = GET_SIZE(HDRP(next_bp));
-    word prev8 = GET_PREV8(bp);
-
-    if (prev_alloc && next_alloc) {         /* Case 1 */
-        return bp;
-    }
-    else if (prev_alloc && !next_alloc){    /* Case 2 */
-        delete_bp_from_freelist(next_bp, next_size);
-        delete_bp_from_freelist(bp, size);
-
-        size += next_size;
-        /* prev is not free; prev can be 8 bytes; this block is free*/
-        PUTWORD(HDRP(bp), PACK(size, 0, prev8, 0));
-        PUTWORD(FTRP(bp), PACK(size, 0, prev8, 0));
-        add_bp_to_freelist(bp, size);
-    } else {                                /* !prev_alloc */
-        byte *prev_bp;
-        size_t prev_size;
-        if (prev8) {
-            /* 8 byte blocks doesn't have footers */
-            prev_bp = bp - 8;
-            prev_size = 8;
-        }
-        else {
-            /* previous free block in other sizes has footers */
-            prev_bp = PREV_BLKP(bp);
-            prev_size = GET_SIZE(HDRP(prev_bp));
-        }
-        /* If the previous previous block is 8 bytes */
-        word prev_prev8 = GET_PREV8(prev_bp);
-        if (next_alloc) {                   /* Case 3 */
-            delete_bp_from_freelist(prev_bp, prev_size);
-            delete_bp_from_freelist(bp, size);
-            size += prev_size;
-
-            /* Previous previous block is not free,
-             * Previous previous block could be 8 bytes,
-             * Previous block is free*/
-            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-            PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-            add_bp_to_freelist(prev_bp, size);
-            bp = prev_bp;
-        }
-        else {                              /* Case 4 */
-            delete_bp_from_freelist(prev_bp, prev_size);
-            delete_bp_from_freelist(next_bp, next_size);
-            delete_bp_from_freelist(bp, size);
-            size += prev_size + next_size;
-
-            PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-            PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
-            add_bp_to_freelist(prev_bp, size);
-            bp = prev_bp;
-        }
-    }
     return bp;
+
+    //dbg_printf("[call]\tcoalesce, bp = %llx\n", (dword) bp);
+    //byte *next_bp = NEXT_BLKP(bp);
+    //word prev_alloc = !GET_PREVFREE(bp);
+    //word next_alloc = GET_ALLOC(HDRP(next_bp));
+    //size_t size = GET_SIZE(HDRP(bp));
+    //size_t next_size = GET_SIZE(HDRP(next_bp));
+    //word prev8 = GET_PREV8(bp);
+
+    //if (prev_alloc && next_alloc) {         /* Case 1 */
+    //    dbg_printf("case 1\n");
+    //    return bp;
+    //}
+    //else if (prev_alloc && !next_alloc){    /* Case 2 */
+    //    dbg_printf("case 2\n");
+    //    delete_bp_from_freelist(next_bp, next_size);
+    //    delete_bp_from_freelist(bp, size);
+
+    //    dbg_printf("before addition, size = %u\n", (word) size);
+    //    size += next_size;
+    //    dbg_printf("after addition, size = %u\n", (word) size);
+    //    /* prev is not free; prev can be 8 bytes; this block is free*/
+    //    PUTWORD(HDRP(bp), PACK(size, 0, prev8, 0));
+    //    PUTWORD(FTRP(bp), PACK(size, 0, prev8, 0));
+    //    add_bp_to_freelist(bp, size);
+    //    
+    //    /* Tell next block this block is free */
+    //    SET_PREVFREE(NEXT_BLKP(bp), 1);
+    //    SET_FOOTER(NEXT_BLKP(bp));
+    //} else {                                /* !prev_alloc */
+    //    byte *prev_bp;
+    //    size_t prev_size;
+    //    if (prev8) {
+    //        /* 8 byte blocks doesn't have footers */
+    //        prev_bp = bp - 8;
+    //        prev_size = 8;
+    //    }
+    //    else {
+    //        /* previous free block in other sizes has footers */
+    //        prev_bp = PREV_BLKP(bp);
+    //        prev_size = GET_SIZE(HDRP(prev_bp));
+    //    }
+    //    /* If the previous previous block is 8 bytes */
+    //    word prev_prev8 = GET_PREV8(prev_bp);
+    //    if (next_alloc) {                   /* Case 3 */
+    //        dbg_printf("case 3\n");
+    //        delete_bp_from_freelist(prev_bp, prev_size);
+    //        delete_bp_from_freelist(bp, size);
+    //        size += prev_size;
+
+    //        /* Previous previous block is not free,
+    //         * Previous previous block could be 8 bytes,
+    //         * Previous block is free*/
+    //        PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+    //        PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+    //        add_bp_to_freelist(prev_bp, size);
+    //        bp = prev_bp;
+
+    //        /* Tell next block this block is free */
+    //        SET_PREVFREE(NEXT_BLKP(bp), 1);
+    //        SET_FOOTER(NEXT_BLKP(bp));
+    //    }
+    //    else {                              /* Case 4 */
+    //        dbg_printf("case 4\n");
+    //        delete_bp_from_freelist(prev_bp, prev_size);
+    //        delete_bp_from_freelist(next_bp, next_size);
+    //        delete_bp_from_freelist(bp, size);
+    //        size += prev_size + next_size;
+
+    //        PUTWORD(HDRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+    //        PUTWORD(FTRP(prev_bp), PACK(size, 0, prev_prev8, 0));
+    //        add_bp_to_freelist(prev_bp, size);
+    //        bp = prev_bp;
+
+    //        /* Tell next block this block is free */
+    //        SET_PREVFREE(NEXT_BLKP(bp), 1);
+    //        SET_FOOTER(NEXT_BLKP(bp));
+    //    }
+    //}
+    //dbg_printf("[return]\tcoalesce, bp = %llx\n", (dword) bp);
+    //return bp;
 }
 
 /* 
@@ -563,7 +640,7 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
     //TODO dwords?
     byte *bp;
     size_t size;
-    dbg_printf("extend_heap, words= %u, add_to_freelist = %d\n",
+    dbg_printf("[call]\textend_heap, words= %u, add_to_freelist = %d\n",
             (word) words, add_to_freelist);
 
     /* Allocate an even number of words to maintain alignment */
@@ -579,7 +656,6 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
     /* Initialize free block header/footer and the epilogue header */
     PUTWORD(HDRP(bp), PACK(size, prevfree, prev8, 0));  /* Free block header */
     PUTWORD(FTRP(bp), PACK(size, prevfree, prev8, 0));  /* Free block footer */
-    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1, now8, 1));  /* New epilogue header */
 
     if (add_to_freelist) {
         add_bp_to_freelist(bp, size);
@@ -587,6 +663,10 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
         //dbg_printf("Before extend_heap coalescing, bp = %llx\n", (dword) bp);
         bp = coalesce(bp);
         //dbg_printf("After extend_heap coalescing, bp = %llx\n", (dword) bp);
+        PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1, now8, 1));  /* New epilogue header */
+    }
+    else {
+        PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 0, now8, 1));  /* New epilogue header */
     }
 
     return bp;
@@ -606,7 +686,7 @@ int mm_init(void) {
     root = 0;      /* tree root for >24 bytes blocks */
 
     PUTWORD(heap_start, PACK(0, 0, 0, 1));        /* Prologue footer, padding */
-    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1, 0, 1));   /* Epilogue header */
+    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 0, 0, 1));   /* Epilogue header */
     extend_heap(CHUNKSIZE / WSIZE, 1);
     //mm_checkheap(__LINE__);
     return 0;
@@ -660,11 +740,14 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
          *                X
          *                X <--- Needs to be deleted and returned
          */
-        while (ret -> mid) {
-            ret = get_mid_treenode(ret);
-        }
+        treenode *parent = ret;
+        ret = get_mid_treenode(ret);
         /* Detatch block from mid list */
-        get_parent_treenode(ret) -> mid = 0;
+        parent -> mid = ret -> mid;
+        treenode *ret_mid = get_mid_treenode(ret);
+        if (ret_mid) {
+            ret_mid -> parent = ret -> parent;
+        }
     }
     else {
         ret = delete_binary_treenode(ret, result_is_left);
@@ -716,7 +799,7 @@ static void *find_fit_and_detatch(size_t asize) {
     return ret;
 }
 
-static void place(void *bp, size_t asize) {
+static void place (void *bp, size_t asize) {
     //TODO deal with prev8
     size_t csize = GET_SIZE(HDRP(bp));   
     word remaining_size = csize - asize;
@@ -728,7 +811,7 @@ static void place(void *bp, size_t asize) {
          * split the block into two blocks and allocate the first one */
         /* Allocate current block, and
          * Assign to now block if previous block is 8 bytes */
-        word next8 = (remaining_size == 8); /* next block is 8 byts */
+        word next8 = (remaining_size == 8); /* next block is 8 bytes */
 
         /* previous block must not be free */
         PUTWORD(HDRP(bp), PACK(asize, 0, prev8, 1));
@@ -736,28 +819,32 @@ static void place(void *bp, size_t asize) {
         /* Assign to next block if now block is 8 bytes */
         void *newbp = NEXT_BLKP(bp);
         PUTWORD(HDRP(newbp), PACK(remaining_size, 0, now8, 0));
+        SET_FOOTER(newbp);
 
         void *newbp_next = NEXT_BLKP(newbp);
         if (next8) {
             /* Assign to next next block if remaining block is 8 bytes */
             PUTWORD(HDRP(newbp_next), (GETWORD(HDRP(newbp_next)) | 6));
-
+            SET_FOOTER(newbp_next);
             /* add newbp to list8 */
             add_to_l8((l8node *) newbp);
         }
         //TODO reordering if statements?
         else if (remaining_size == 16) {
             SET_PREVFREE(newbp_next, 1);
+            SET_FOOTER(newbp_next);
             /* add newbp to list16 */
             add_to_l16((l16node *) newbp);
         }
         else if (remaining_size == 24) {
             SET_PREVFREE(newbp_next, 1);
+            SET_FOOTER(newbp_next);
             /* add newbp to list24 */
             add_to_l24((l24node *) newbp);
         }
         else { /* remaining_size > 24 */
             SET_PREVFREE(newbp_next, 1);
+            SET_FOOTER(newbp_next);
             /* add newbp to tree */
             treenode *p_treenode = (treenode *) newbp;
             p_treenode -> left = 0;
@@ -771,7 +858,13 @@ static void place(void *bp, size_t asize) {
         /* If remaining block is smaller than minimum block size,
          * allocate the whole block */
         /* Allocate current block */
-        PUTWORD(HDRP(bp), PACK(csize, 0, prev8, 1));
+        word prevfree = GET_PREVFREE(bp);
+        PUTWORD(HDRP(bp), PACK(csize, prevfree, prev8, 1));
+
+        /* Update next block info */
+        void *next_bp = NEXT_BLKP(bp);
+        SET_PREVFREE(next_bp, 0);
+        SET_FOOTER(next_bp);
     }
 }
 
@@ -779,7 +872,7 @@ static void place(void *bp, size_t asize) {
  * malloc
  */
 void *malloc (size_t size) {
-    mm_checkheap(__LINE__);
+    //mm_checkheap(__LINE__);
     dbg_printf("malloc, size = %u\n", (word)size);
     size_t asize;      /* Adjusted block size */
     byte *bp;      
@@ -814,10 +907,16 @@ void *malloc (size_t size) {
  * free
  */
 void free (void *bp) {
+    dbg_printf("[call]\tfree, bp = %llx\n", (dword) bp);
     if(!bp) return;
     size_t size = GET_SIZE(HDRP(bp));
     /* Put new boundary tags around the block to free */
-    SET_ALLOC(bp, 0);
+    PUTWORD(HDRP(bp), (GETWORD(HDRP(bp)) & ~1));
+    /* Put next block's header and possibly footer tag
+     * to indicate its prev block is free*/
+    void * next_bp = NEXT_BLKP(bp);
+    SET_PREVFREE(next_bp, 1);
+    SET_FOOTER(next_bp);
     if (size > 8) {
         PUTWORD(FTRP(bp), GETWORD(HDRP(bp)));
     }
@@ -909,6 +1008,7 @@ static inline int get_l8_size() {
     int count = 0;
     while (l8p) {
         count++;
+        dbg_printf("a:%d l8p: bp = %llx, HDRP(l8p) = %u\n", GET_ALLOC(HDRP(l8p)), (dword) l8p, GETWORD(HDRP(l8p)));
         l8p = get_next_l8node(l8p);
     }
     return count;
@@ -919,6 +1019,7 @@ static inline int get_l16_size() {
     int count = 0;
     while (l16p) {
         count++;
+        dbg_printf("a:%d l16p: bp = %llx, HDRP(l16p) = %u\n", GET_ALLOC(HDRP(l16p)), (dword) l16p, GETWORD(HDRP(l16p)));
         l16p = get_next_l16node(l16p);
     }
     return count;
@@ -929,6 +1030,7 @@ static inline int get_l24_size() {
     int count = 0;
     while (l24p) {
         count++;
+        dbg_printf("a:%d l24p: bp = %llx, HDRP(l24p) = %u\n", GET_ALLOC(HDRP(l24p)), (dword) l24p, GETWORD(HDRP(l24p)));
         l24p = get_next_l24node(l24p);
     }
     return count;
@@ -937,13 +1039,42 @@ static inline int get_l24_size() {
 static int get_tree_size(treenode *root) {
     if (!root) return 0;
     else if (root->left == 0 && root->mid == 0 && root->right == 0) {
+        dbg_printf("a:%d tree: bp = %llx, HDRP(root) = %u\n", GET_ALLOC(HDRP(root)), (dword) root, GETWORD(HDRP(root)));
         return 1;
     }
-    else return 1 + get_tree_size(get_left_treenode(root))
+    else {
+        dbg_printf("a:%d tree: bp = %llx, HDRP(root) = %u\n", GET_ALLOC(HDRP(root)), (dword) root, GETWORD(HDRP(root)));
+        return 1 + get_tree_size(get_left_treenode(root))
         + get_tree_size(get_mid_treenode(root))
         + get_tree_size(get_right_treenode(root));
+    }
 }
-    
+
+size_t g_treenode_size;
+static void inorder_test(treenode *root) {
+    if (!root) {
+        return;
+    }
+    inorder_test(get_left_treenode(root));
+    size_t prev_size = g_treenode_size;
+    g_treenode_size = size_tn(root);
+    if (prev_size >= g_treenode_size) {
+        cprintf("Tree inconsistent. prev == %u, now == %u\n",
+                (word) prev_size, (word) g_treenode_size);
+    }
+    printf("%u, ", (word)g_treenode_size);
+    inorder_test(get_right_treenode(root));
+}
+
+static void preorder_test(treenode *root) {
+    if (!root) {
+        return;
+    }
+    printf("%u, ", (word) size_tn(root));
+    preorder_test(get_left_treenode(root));
+    preorder_test(get_right_treenode(root));
+}
+
 /*
  * mm_checkheap
  */
@@ -955,8 +1086,6 @@ void mm_checkheap(int lineno) {
 
     /* Check epilogue block */
     byte *heap_end = mem_heap_hi();
-    verbose_printf("heap_start = %llx, heap_end = %llx\n",
-            (dword) heap_start, (dword) heap_end);
 
     if (GET_SIZE(((byte *) heap_end) + 1 - WSIZE)) {
         checkheap_printf(lineno, "epilogue block header size is not 0\n");
@@ -986,13 +1115,19 @@ void mm_checkheap(int lineno) {
         if (GET_SIZE(HDRP(bp)) < MIN_BLOCKSIZE) {
             checkheap_printf(lineno, "Header of bp size < MIN_BLOCKSIZE");
         }
-        /* Check coalescing: no two consecutive free blocks in the heap */
         if (GET_ALLOC(HDRP(bp)) == 0) {
+            dbg_printf("a:%d block: bp = %llx, HDRP(bp) = %u\n", GET_ALLOC(HDRP(bp)), (dword) bp, GETWORD(HDRP(bp)));
             freeblock_count++;
+            /* Check coalescing: no two consecutive free blocks in the heap */
+            /* TODO supressing
             if (prev_isfree) {
-                checkheap_printf(lineno, "two consecutive free blocks");
+                checkheap_printf(lineno, "two consecutive free blocks,");
+                cprintf("bp = %llx\n", (dword) bp);
+                exit(-1);
             }
+            */
             prev_isfree = 1;
+            prev_isfree = prev_isfree;
         }
         else {
             prev_isfree = 0;
@@ -1014,6 +1149,14 @@ void mm_checkheap(int lineno) {
                 lineno, freelist_node_count, freeblock_count);
         cprintf("l8 = %d, l16 = %d, l24 = %d, tree = %d\n",
                 l8size, l16size, l24size, treesize);
+        //TODO: debugging
+        //exit(-1);
     }
 
+    /* Check if the tree is in order */
+    g_treenode_size = 0;
+    //inorder_test(root);
+    preorder_test(root);
+    printf("\n");
+    /* Check if the tree list is correct */
 }
