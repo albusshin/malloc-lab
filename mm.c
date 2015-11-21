@@ -56,7 +56,7 @@
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
-#define CHUNKSIZE  (1<<12)   /* Extend heap by this amount (bytes) */  
+#define CHUNKSIZE  (1<<7)   /* Extend heap by this amount (bytes) */  
 #define MIN_BLOCKSIZE 8     /* Minimum block size this implementation */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -69,6 +69,7 @@
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)  (GETWORD(p) & ~0x7)                   
 #define GET_ALLOC(p) (GETWORD(p) & 0x1)                    
+
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp)       ((byte *)(bp) - WSIZE)                      
@@ -96,24 +97,28 @@ typedef unsigned long long  dword;
 
 /* Structure for tree node, for blocks larger than 24 bytes */
 typedef struct treenode {
-    struct treenode *left;
-    struct treenode *mid;
-    struct treenode *right;
+    word left;
+    word mid;
+    word right;
+    word parent;
 } treenode;
 
 /* 8-byte blocks list node */
 typedef struct list8_node {
-    word next_offset;
+    word next;
 } l8node;
 
 /* 16-byte blocks list node */
 typedef struct list16_node {
-    struct list16_node *next;
+    word next;
+    word prev;
 } l16node;
 
+//TODO put 24 inside tree?
 /* 24-byte blocks list node */
 typedef struct list24_node {
-    struct list24_node *next;
+    word next;
+    word prev;
 } l24node;
 
 static byte        *heap_start = 0; /* The start of the heap */
@@ -126,36 +131,104 @@ static treenode    *root = 0;       /* tree root for >24 bytes blocks */
 //TODO try using macros
 
 /* Pack a size and allocated bit into a word */
+static inline word PACK(size_t size, int prev_is_free, int prev_is_8, int alloc) {
+    return size | (prev_is_free) << 2 | (prev_is_8) << 1 | (alloc);
+}
+
+/*
 static inline word PACK(size_t size, int prev_is_8, int alloc) {
     return size | (prev_is_8) << 1 | (alloc);
 }
+*/
 
 static inline word GET_PREV8(byte* bp) {
     return (GETWORD(HDRP(bp)) & 0x2) >> 1;
 }
 
-static inline l8node *get_next_l8node(l8node *p_l8node) {
-    if (p_l8node -> next_offset == 0) return NULL;
-    return (l8node *) (heap_start + (p_l8node -> next_offset));
+static inline word GET_PREVFREE(byte* bp) {
+    return (GETWORD(HDRP(bp)) & 0x4) >> 2;
 }
 
-static inline word get_l8node_offset(l8node *p) {
-    if (!p) return 0;
-    return (word) ((dword) p - (dword) heap_start);
+static inline void SET_PREVFREE(byte *bp, word prev_is_free) {
+    word *hdrp = (word *)HDRP(bp);
+    if (prev_is_free) {
+        PUTWORD(hdrp, (GETWORD(hdrp) | 0x4));
+    }
+    else {
+        PUTWORD(hdrp, (GETWORD(hdrp) & ~0x4));
+    }
+}
+
+static inline void SET_ALLOC(byte *bp, word alloc){
+    word *hdrp = (word *)HDRP(bp);
+    if (alloc) {
+        PUTWORD(hdrp, (GETWORD(hdrp) | 0x1));
+    }
+    else {
+        PUTWORD(hdrp, (GETWORD(hdrp) & ~0x1));
+    }
+}
+
+static inline void *TOPTR(word offset) {
+    if (!offset) return NULL;
+    return (void*) ((byte *) heap_start + offset);
+}
+
+static inline word TOOFST(void *ptr) {
+    if (!ptr) return 0;
+    return (word) ((dword) ptr - (dword)heap_start);
+}
+
+static inline l8node *get_next_l8node(l8node *p_l8node) {
+    if (p_l8node -> next == 0) return NULL;
+    return (l8node *) (heap_start + (p_l8node -> next));
+}
+
+static inline l16node *get_next_l16node(l16node *p_l16node) {
+    return (l16node *) TOPTR(p_l16node -> next);
+}
+
+static inline l24node *get_next_l24node(l24node *p_l24node) {
+    return (l24node *) TOPTR(p_l24node -> next);
+}
+
+static inline treenode *get_left_treenode(treenode *p_treenode) {
+    return (treenode *) TOPTR(p_treenode -> left);
+}
+
+static inline treenode *get_mid_treenode(treenode *p_treenode) {
+    return (treenode *) TOPTR(p_treenode -> mid);
+}
+
+static inline treenode *get_right_treenode(treenode *p_treenode) {
+    return (treenode *) TOPTR(p_treenode -> right);
+}
+
+static inline treenode *get_parent_treenode(treenode *p_treenode) {
+    return (treenode *) TOPTR(p_treenode -> parent);
 }
 
 static inline void add_to_l8(l8node *p_l8node) {
-    p_l8node -> next_offset = get_l8node_offset(l8head);
+    /* There's no prev pointers in list8 */
+    p_l8node -> next = TOOFST(l8head);
     l8head = p_l8node;
 }
 
 static inline void add_to_l16(l16node *p_l16node) {
-    p_l16node -> next = l16head;
+    p_l16node -> next = TOOFST(l16head);
+    if (l16head) {
+        l16head -> prev = TOOFST(p_l16node);
+    }
+    p_l16node -> prev = 0;
     l16head = p_l16node;
 }
 
 static inline void add_to_l24(l24node *p_l24node) {
-    p_l24node -> next = l24head;
+    p_l24node -> next = TOOFST(l24head);
+    if (l24head) {
+        l24head -> prev = TOOFST(p_l24node);
+    }
+    p_l24node -> prev = 0;
     l24head = p_l24node;
 }
 
@@ -167,20 +240,6 @@ static inline word size_tn(treenode *p_treenode) {
 }
 
 /*
- * Given a subtree root and a treenode pointer,
- * append the pointer to the end of the mid list of the subtree root
- */
-/*
-static inline void append_mid(treenode *root, treenode *p_treenode) {
-    treenode *p = root;
-    while (p -> mid) {
-        p = p -> mid;
-    }
-    p -> mid = p_treenode;
-}
-*/
-
-/*
  * Insert the treenode pointer into the tree.
  * If the treenode root doesn't exist, the new node becomes the root.
  */
@@ -190,33 +249,43 @@ static inline void insert_treenode(treenode *p_treenode) {
 
     if (!root) {
         root = p_treenode;
+        p_treenode -> parent = 0;
         return;
     }
     word node_size = size_tn(p_treenode);
-    treenode **rover = &root;       /* 2 dimensional pointer to update node */
+    word rootword = TOOFST(root);
+    /* pointer to the offset inside a treenode */
+    word *rover = &rootword;
+    treenode *parent = 0;
     while (*rover) {
-        word rover_size = size_tn(*rover);
+        treenode *p_rover = (treenode *) TOPTR(*rover);
+        word rover_size = size_tn(p_rover);
         //dbg_printf("rover_size == %u, p_treenode size=%u\n",
                 //rover_size, node_size);
         /* If an exact match is found, find the tail of the midlist */
         if (node_size == rover_size) {
             while (*rover) {
-                rover = &((*rover) -> mid);
+                parent = p_rover;
+                rover = &(p_rover -> mid);
+                p_rover = (treenode *) TOPTR(*rover);
             }
             break;
         }
         /* Go to left if the block size is smaller than rover's block size */
         else if (node_size < rover_size) {
-            rover = &((*rover) -> left);
+            parent = p_rover;
+            rover = &(p_rover -> left);
         }
         /* Go to right if the block size is larger than rover's block size */
         else {
-            rover = &((*rover) -> right);
+            parent = p_rover;
+            rover = &(p_rover -> right);
         }
     }
     /* If we found the value in where rover points to is NULL,
      * just update the value in where rover points to as the new node addr */
-    *rover = p_treenode;
+    *rover = TOOFST(p_treenode);
+    p_treenode -> parent = TOOFST(parent);
 }
 
 static inline void * get_prev_bp(byte *bp) {
@@ -250,12 +319,13 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
         return NULL;                                        
 
     word prev8 = GET_PREV8(bp);
+    word prevfree = GET_PREVFREE(bp);
     bool now8 = (size == 8);
     
     /* Initialize free block header/footer and the epilogue header */
-    PUTWORD(HDRP(bp), PACK(size, prev8, 0));         /* Free block header */
-    PUTWORD(FTRP(bp), PACK(size, prev8, 0));         /* Free block footer */
-    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, now8, 1));  /* New epilogue header */
+    PUTWORD(HDRP(bp), PACK(size, prevfree, prev8, 0));  /* Free block header */
+    PUTWORD(FTRP(bp), PACK(size, prevfree, prev8, 0));  /* Free block footer */
+    PUTWORD(HDRP(NEXT_BLKP(bp)), PACK(0, 1, now8, 1));  /* New epilogue header */
 
     if (add_to_freelist) {
         if (size == 8) {
@@ -276,9 +346,10 @@ static void *extend_heap(size_t words, bool add_to_freelist) {
         else {
             //dbg_printf("size > 24\n");
             treenode *p_treenode = (treenode *)bp;
-            p_treenode -> left = NULL;
-            p_treenode -> mid = NULL;
-            p_treenode -> right = NULL;
+            p_treenode -> left = 0;
+            p_treenode -> mid = 0;
+            p_treenode -> right = 0;
+            p_treenode -> parent = 0;
             insert_treenode(p_treenode);
         }
 
@@ -304,8 +375,8 @@ int mm_init(void) {
     l24head = 0;   /* 24 bytes block list head */
     root = 0;      /* tree root for >24 bytes blocks */
 
-    PUTWORD(heap_start, PACK(0, 0, 1)); /* Prologue footer, Alignment padding */
-    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 0, 1));      /* Epilogue header */
+    PUTWORD(heap_start, PACK(0, 0, 0, 1));        /* Prologue footer, padding */
+    PUTWORD(heap_start + (1 * WSIZE), PACK(0, 1, 0, 1));   /* Epilogue header */
     extend_heap(CHUNKSIZE / WSIZE, 1);
     //mm_checkheap(__LINE__);
     return 0;
@@ -322,9 +393,7 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
     if (!root) return NULL;     /* if the current tree is empty, return NULL */
 
     treenode *ret = NULL;       /* the return value */
-    treenode *prev = NULL;      /* the parent of the nowroot pointer */
     treenode *nowroot = root;   /* the now root pointer while traversing */
-    treenode *parent = NULL;    /* the return value's parent node */
     bool prev_is_left = 0;      /* is nowroot coming from prev -> left */
     bool result_is_left = 1;    /* is ret coming from parent -> left */
     while (nowroot) {
@@ -332,24 +401,20 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
         
         if (asize == nowroot_size) {
             /* Found best match */
-            parent = prev;
             result_is_left = prev_is_left;
             ret = nowroot;
             break;
         }
         else if (asize < nowroot_size) {
             /* Next best match, update ret info */
-            parent = prev;
             result_is_left = prev_is_left;
             ret = nowroot;
-            prev = nowroot;
-            nowroot = nowroot -> left;
+            nowroot = get_left_treenode(nowroot);
             prev_is_left = 1;
         }
         else { /* (asize > nowroot_size) */
             /* nowroot not large enough. Try larger blocks */
-            prev = nowroot;
-            nowroot = nowroot -> right;
+            nowroot = get_right_treenode(nowroot);
             prev_is_left = 0;
         }
     }
@@ -365,13 +430,15 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
          *                X <--- Needs to be returned
          */
         while (ret -> mid) {
-            prev = ret;
-            ret = ret -> mid;
+            ret = get_mid_treenode(ret);
         }
         /* Detatch block from mid list */
-        prev -> mid = NULL;
+        get_parent_treenode(ret) -> mid = 0;
     }
     else {
+        treenode *parent = get_parent_treenode(ret);
+        treenode *leftchild = get_left_treenode(ret);
+        treenode *rightchild = get_right_treenode(ret);
         /* ret doesn't have mid child, need to reconfigure tree.
          *
          *                X <--- Needs to be returned
@@ -380,35 +447,39 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
          */
         if (!ret -> left && !ret -> right) {
             /* Case 1: left and right child of nowroot both NULL, hence leaf */
-            if (!parent) {
+            if (!ret -> parent) {
                 /* ret is root */
                 root = NULL;
             }
             else {
-                if (result_is_left) parent -> left = NULL;
-                else parent -> right = NULL;
+                if (result_is_left) parent -> left = 0;
+                else parent -> right = 0;
             }
         }
         else if (!ret -> left && ret -> right) {
             /* Case 2: left is NULL and right is not NULL */
             if (!parent) {
                 /* ret is root */
-                root = ret -> right;
+                root = rightchild;
+                root -> parent = 0;
             }
             else {
                 if (result_is_left) parent -> left = ret -> right;
                 else parent -> right = ret -> right;
+                rightchild -> parent = TOOFST(parent);
             }
         }
         else if (ret -> left && !ret -> right) {
             /* Case 3: left is not NULL and right is NULL */
             if (!parent) {
                 /* ret is root */
-                root = ret -> left;
+                root = leftchild;
+                root -> parent = 0;
             }
             else {
                 if (result_is_left) parent -> left = ret -> left;
                 else parent -> right = ret -> left;
+                leftchild -> parent = TOOFST(parent);
             }
         }
         else { /* (ret -> left && ret -> right) */
@@ -417,14 +488,29 @@ static void *find_best_tree_fit_and_detatch(size_t asize) {
             /* Case 4: left and right both not NULL */
             if (!parent) {
                 /* ret is root */
-                prev = ret -> right;        /* Save previous right pointer */
-                root = ret -> left;
-                insert_treenode(prev);      /* Insert prev into new root */
+                /* Save previous right pointer */
+                /*
+                root = leftchild;
+                root -> parent = 0;
+                rightchild -> parent = 0;
+                insert_treenode(rightchild);
+                */
+                root = rightchild;
+                root -> parent = 0;
+                leftchild -> parent = 0;
+                insert_treenode(leftchild);
             }
             else {
+                /*
                 if (result_is_left) parent -> left = ret -> left;
                 else parent -> right = ret -> left;
-                insert_treenode(ret -> right);
+                leftchild -> parent = TOOFST(parent);
+                insert_treenode(rightchild);
+                */
+                if (result_is_left) parent -> left = ret -> right;
+                else parent -> right = ret -> right;
+                rightchild -> parent = TOOFST(parent);
+                insert_treenode(leftchild);
             }
         }
     }
@@ -440,20 +526,27 @@ static void *find_fit_and_detatch(size_t asize) {
     switch (asize) {
     case 8:
         if (l8head) {
+            /* For l8, just move head ahead one position, it's detatched */
             ret = l8head;
             l8head = get_next_l8node(l8head);
             return ret;
         }
     case 16:
         if (l16head) {
+            /* For l16, move head ahead one position,
+             * and assign the prev of new head to NULL, then it's detatched. */
             ret = l16head;
-            l16head = l16head -> next;
+            l16head = get_next_l16node(l16head);
+            if (l16head) l16head -> prev = 0;
             return ret;
         }
     case 24:
         if (l24head) {
+            /* For l24, move head ahead one position,
+             * and assign the prev of new head to NULL, then it's detatched. */
             ret = l24head;
-            l24head = l24head -> next;
+            l24head = get_next_l24node(l24head);
+            if (l24head) l24head -> prev = 0;
             return ret;
         }
     default:
@@ -482,46 +575,40 @@ static void place(void *bp, size_t asize) {
          * Assign to now block if previous block is 8 bytes */
         word next8 = (remaining_size == 8); /* next block is 8 byts */
 
-        PUTWORD(HDRP(bp), PACK(asize, prev8, 1));
-        if (!now8) {
-            /* If now block is not 8 bytes, assign footer */
-            PUTWORD(FTRP(bp), PACK(asize, prev8, 1));
-        }
+        /* previous block must not be free */
+        PUTWORD(HDRP(bp), PACK(asize, 0, prev8, 1));
 
         /* Assign to next block if now block is 8 bytes */
         void *newbp = NEXT_BLKP(bp);
-        PUTWORD(HDRP(newbp), PACK(remaining_size, now8, 0));
-        if (!next8) {
-            /* If next block is not 8 bytes, assign footer */
-            PUTWORD(FTRP(newbp), PACK(remaining_size, now8, 0));
-        }
+        PUTWORD(HDRP(newbp), PACK(remaining_size, 0, now8, 0));
 
+        void *newbp_next = NEXT_BLKP(newbp);
         if (next8) {
             /* Assign to next next block if remaining block is 8 bytes */
-            void *newbp_next = NEXT_BLKP(newbp);
-            PUTWORD(HDRP(newbp_next), (GETWORD(HDRP(newbp_next)) | 2));
-            if ((GET_SIZE(HDRP(newbp_next))) != 8){
-                /* If next next block is not 8 bytes, assign footer */
-                PUTWORD(FTRP(newbp_next), GETWORD(HDRP(newbp_next)));
-            }
+            PUTWORD(HDRP(newbp_next), (GETWORD(HDRP(newbp_next)) | 6));
+
             /* add newbp to list8 */
             add_to_l8((l8node *) newbp);
         }
         //TODO reordering if statements?
         else if (remaining_size == 16) {
+            SET_PREVFREE(newbp_next, 1);
             /* add newbp to list16 */
             add_to_l16((l16node *) newbp);
         }
         else if (remaining_size == 24) {
+            SET_PREVFREE(newbp_next, 1);
             /* add newbp to list24 */
             add_to_l24((l24node *) newbp);
         }
         else { /* remaining_size > 24 */
+            SET_PREVFREE(newbp_next, 1);
             /* add newbp to tree */
-            treenode *p_treenode = (treenode *)newbp;
-            p_treenode -> left = NULL;
-            p_treenode -> mid = NULL;
-            p_treenode -> right = NULL;
+            treenode *p_treenode = (treenode *) newbp;
+            p_treenode -> left = 0;
+            p_treenode -> mid = 0;
+            p_treenode -> right = 0;
+            p_treenode -> parent = 0;
             insert_treenode(p_treenode);
         }
     }
@@ -529,11 +616,7 @@ static void place(void *bp, size_t asize) {
         /* If remaining block is smaller than minimum block size,
          * allocate the whole block */
         /* Allocate current block */
-        PUTWORD(HDRP(bp), PACK(csize, prev8, 1));
-        if (!now8) {
-            /* If now block is not 8 bytes, assign footer */
-            PUTWORD(FTRP(bp), PACK(csize, prev8, 1));
-        }
+        PUTWORD(HDRP(bp), PACK(csize, 0, prev8, 1));
     }
 }
 
@@ -558,7 +641,8 @@ void *malloc (size_t size) {
         asize = DSIZE;
     }
     else {
-        asize = ROUNDUP_DIV(size, DSIZE) * DSIZE + MIN_BLOCKSIZE;
+        asize = ROUNDUP_DIV((WSIZE + size), DSIZE) * DSIZE;
+        //asize = ROUNDUP_DIV(size, DSIZE) * DSIZE + MIN_BLOCKSIZE;
     }
 
     if ((bp = find_fit_and_detatch(asize)) != NULL) {
@@ -577,21 +661,20 @@ void *malloc (size_t size) {
 void free (void *bp) {
     if(!bp) return;
     size_t size = GET_SIZE(HDRP(bp));
-    word prev8 = GET_PREV8(bp);
     /* Put new boundary tags around the block to free */
-    PUTWORD(HDRP(bp), PACK(size, prev8, 0));
+    SET_ALLOC(bp, 0);
     if (size > 8) {
-        PUTWORD(FTRP(bp), PACK(size, prev8, 0));
+        PUTWORD(FTRP(bp), GETWORD(HDRP(bp)));
     }
-    //TODO consider dealing with prev8 tag
     if (size == 8) add_to_l8((l8node *) bp);
     else if (size == 16) add_to_l16((l16node *) bp);
     else if (size == 24) add_to_l24((l24node *) bp);
     else {
         treenode *bp_treenode = (treenode *) bp;
-        bp_treenode -> left = NULL;
-        bp_treenode -> mid = NULL;
-        bp_treenode -> right = NULL;
+        bp_treenode -> left = 0;
+        bp_treenode -> mid = 0;
+        bp_treenode -> right = 0;
+        bp_treenode -> parent = 0;
         insert_treenode(bp_treenode);
     }
     coalesce(bp);
@@ -681,7 +764,7 @@ static inline int get_l16_size() {
     int count = 0;
     while (l16p) {
         count++;
-        l16p = l16p -> next;
+        l16p = get_next_l16node(l16p);
     }
     return count;
 }
@@ -691,19 +774,19 @@ static inline int get_l24_size() {
     int count = 0;
     while (l24p) {
         count++;
-        l24p = l24p -> next;
+        l24p = get_next_l24node(l24p);
     }
     return count;
 }
 
 static int get_tree_size(treenode *root) {
     if (!root) return 0;
-    else if (root->left == NULL && root->mid == NULL && root->right == NULL) {
+    else if (root->left == 0 && root->mid == 0 && root->right == 0) {
         return 1;
     }
-    else return 1 + get_tree_size(root->left)
-        + get_tree_size(root->mid)
-        + get_tree_size(root->right);
+    else return 1 + get_tree_size(get_left_treenode(root))
+        + get_tree_size(get_mid_treenode(root))
+        + get_tree_size(get_right_treenode(root));
 }
     
 /*
